@@ -1,9 +1,11 @@
 {
   "version": 1,
-  "payload": "Every host serves one API at fnPath. A board's address is the first 24 hex chars of the sha-256 of its pairing code; possession of the id is read AND write (writes travel with the id as x-rc-key). GET ?id=<boardId> returns { ok, index: { v: 1, at, writes?, columns[], sessions{} } }; GET ?id=<boardId>&tail=<session key> returns { ok, tail: { key, entries[] } }; GET ?id=<boardId>&cmds=1 returns { ok, cmds[] }. POST { kind: 'update', index, tails[] } REPLACES the index and every named tail, never merges, and garbage-collects tails whose session left the index; POST { kind: 'command', nonce, text, session? } queues a prompt for the pushing machine — bounded by cmdMax commands of cmdTextMax characters each, and whether one runs is the extension's decision, never the relay's; POST { kind: 'ack', nonces[] } removes acked commands (at-least-once). The static page and all three hosts (Netlify functions, Cloudflare Worker, plain Node) speak exactly this.",
+  "payload": "Every host serves one API at fnPath. A board's address is the first 24 hex chars of the sha-256 of its pairing code; possession of the id is read AND write (writes travel with the id as x-rc-key). GET ?id=<boardId> returns { ok, index: { v: 1, at, writes?, composer?, columns[], sessions{} } }; GET ?id=<boardId>&tail=<session key> returns { ok, tail: { key, entries[] } }; GET ?id=<boardId>&cmds=1 returns { ok, cmds[] }. POST { kind: 'update', index, tails[] } REPLACES the index and every named tail, never merges, and garbage-collects tails whose session left the index; POST { kind: 'command', nonce, text, session?, model?, effort?, thinking? } queues a prompt for the pushing machine — bounded by cmdMax commands of cmdTextMax characters each, model/effort are settingOk-shaped ids and thinking is enabled|disabled, and whether one runs is the extension's decision, never the relay's; POST { kind: 'ack', nonces[] } removes acked commands (at-least-once). The static page and all three hosts (Netlify functions, Cloudflare Worker, plain Node) speak exactly this.",
   "idOk": "^[0-9a-f]{24}$",
   "keyOk": "^[A-Za-z0-9._-]{1,80}$",
   "nonceOk": "^[A-Za-z0-9._-]{1,64}$",
+  "settingOk": "^[A-Za-z0-9._-]{1,120}$",
+  "thinkingOk": "^(enabled|disabled)$",
   "cmdMax": 20,
   "cmdTextMax": 20000,
   "fnPath": "/board"

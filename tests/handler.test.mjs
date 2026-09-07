@@ -14,7 +14,7 @@
  * board-core. The extension cannot import this file, so the agreement between
  * the two ends is through the contract file — never through a literal.
  */
-import { handle, ID_OK, KEY_OK, NONCE_OK, CMD_MAX, CMD_TEXT_MAX } from '../functions/board-core.mjs'
+import { handle, ID_OK, KEY_OK, NONCE_OK, SETTING_OK, THINKING_OK, CMD_MAX, CMD_TEXT_MAX } from '../functions/board-core.mjs'
 
 let fails = 0
 const ok = (c, m) => { if (!c) { console.error('FAIL:', m); fails++ } else console.log('ok:', m) }
@@ -268,6 +268,37 @@ const command = (store, nonce, text, extra = {}) => post(store, {
 {
   ok(NONCE_OK.source === '^[A-Za-z0-9._-]{1,64}$', 'NONCE_OK is the literal both ends carry')
   ok(CMD_MAX === 20 && CMD_TEXT_MAX === 20_000, 'the queue bounds are the literal numbers both ends carry')
+}
+
+// --- model / effort / thinking ride a command, validated for shape only ------
+{
+  const store = fakeStore()
+  await post(store, { body: { kind: 'update', index: index(), tails: [] } })
+  const r = await command(store, 'n1', 'go', { model: 'claude-opus-5', effort: 'high', thinking: 'disabled' })
+  ok(r.status === 200, 'a command with model, effort and thinking is queued')
+  const queued = JSON.parse(store.map.get(`c:${ID}`))
+  ok(queued[0].model === 'claude-opus-5' && queued[0].effort === 'high' && queued[0].thinking === 'disabled',
+    '…and the queue holds all three, verbatim')
+  const plain = await command(store, 'n2', 'go')
+  ok(plain.status === 200 && JSON.parse(store.map.get(`c:${ID}`))[1].model === undefined,
+    'a command without them carries none of the three fields at all')
+}
+
+{
+  const store = fakeStore()
+  await post(store, { body: { kind: 'update', index: index(), tails: [] } })
+  const badModel = await command(store, 'n1', 'x', { model: 'provider:/secret' })
+  ok(badModel.status === 400 && badModel.json.error.includes('model id'),
+    'a model id that is not settingOk-shaped is refused')
+  const badEffort = await command(store, 'n1', 'x', { effort: 'a b' })
+  ok(badEffort.status === 400 && badEffort.json.error.includes('effort'),
+    'an effort that is not settingOk-shaped is refused')
+  const badThinking = await command(store, 'n1', 'x', { thinking: 'maybe' })
+  ok(badThinking.status === 400 && badThinking.json.error.includes('thinking'),
+    'a thinking mode outside the closed set is refused')
+  const badType = await command(store, 'n1', 'x', { thinking: true })
+  ok(badType.status === 400, 'a boolean thinking is refused — the mode is enabled|disabled, not true|false')
+  ok(store.map.get(`c:${ID}`) === undefined, '…and none of the shape rejects stored anything')
 }
 
 console.log(fails ? `\n${fails} failure(s)` : '\nrelay handler: all ok')

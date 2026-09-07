@@ -204,6 +204,67 @@ async function boot({ hash = '', saved = null, fetchImpl }) {
   ok(v.text().trim() !== 'undefined', 'repoll: the page is never the text "undefined"')
 }
 
+// 7. The host's model catalogue → the composer's pickers appear.
+{
+  const composer = {
+    model: 'claude-opus-5', effort: 'high', thinking: 'enabled', thinkingSupported: true,
+    models: [
+      { id: 'claude-opus-5', label: 'Opus 5', detail: '200K' },
+      { id: 'claude-haiku-4-5', label: 'Haiku 4.5', detail: '200K' },
+    ],
+    efforts: [{ key: 'low', label: 'Low' }, { key: 'high', label: 'High' }],
+  }
+  const v = await boot({
+    hash: '#0123456789abcdef01234567',
+    fetchImpl: async (url) => url.includes('&tail=')
+      ? { status: 200, body: { ok: true, tail: { entries: [] } } }
+      : { status: 200, body: { ok: true, index: { ...INDEX, writes: true, composer } } },
+  })
+  ok(!!findByTag(v.root, 'button', (n) => (n.textContent || '').includes('Opus 5')),
+    'model picker: the chip shows the host default model by label')
+  ok(!!findByTag(v.root, 'button', (n) => (n.textContent || '').includes('High')),
+    'effort picker: the chip shows the host default effort by label')
+  ok(!!findByTag(v.root, 'button', (n) => (n.textContent || '').includes('Thinking')),
+    'thinking picker: the toggle chip renders when the host supports it')
+  ok(v.text().trim() !== 'undefined', 'composer: the page is never the text "undefined"')
+}
+
+// 8. The agent's answer renders as markdown, not a wall of plain text.
+{
+  const v = await boot({
+    hash: '#0123456789abcdef01234567',
+    fetchImpl: async (url) => url.includes('&tail=')
+      ? {
+          status: 200,
+          body: {
+            ok: true,
+            tail: {
+              key: 'abc-123', at: Date.now(),
+              entries: [
+                { kind: 'prompt', at: 1000, text: 'do the thing' },
+                { kind: 'text', at: 1100, text: '# Answer\n\nSome **bold**, `code`, and a [link](https://example.com)\n\n- one\n- two\n\n```js\nconst x = 1\n```' },
+                { kind: 'tool', at: 1200, name: 'Bash', status: 'ok', durationMs: 3000 },
+                { kind: 'result', at: 1300, summary: 'done', durationMs: 5000 },
+              ],
+            },
+          },
+        }
+      : { status: 200, body: { ok: true, index: { ...INDEX, sessions: { 'abc-123': { ...INDEX.sessions['abc-123'], tv: 1 } } } } },
+  })
+  // Open the chat: click the session's card, which sets openKey and re-renders.
+  const card = findByTag(v.root, 'button', (n) => (n.title || '').includes('Open the chat'))
+  card.onclick()
+  await v.flush()
+  ok(v.text().includes('You') && v.text().includes('do the thing'), 'markdown: the prompt bubble renders')
+  ok(v.text().includes('Answer'), 'markdown: a heading renders')
+  ok(v.text().includes('bold'), 'markdown: bold inline renders as its text')
+  ok(!!findByTag(v.root, 'pre'), 'markdown: a fenced code block becomes a <pre>')
+  ok(v.text().includes('const x = 1'), 'markdown: the code block keeps its code')
+  ok(v.text().includes('one') && v.text().includes('two'), 'markdown: a list renders')
+  ok(v.text().includes('Bash') && v.text().includes('done'), 'transcript: tool and result rows render')
+  ok(v.text().trim() !== 'undefined', 'markdown: the page is never the text "undefined"')
+}
+
 if (fails) {
   console.error(`\n${fails} viewer assertion(s) failed`)
   process.exit(1)
