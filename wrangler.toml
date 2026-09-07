@@ -1,0 +1,15 @@
+# The relay on Cloudflare Workers. `run_worker_first = false` makes Workers
+# Static Assets serve the page (public/) first; the worker only answers /board.
+# The one manual step: `wrangler kv namespace create BOARDS` and put the id
+# below (or `wrangler kv namespace list` to find it again).
+name = "agents-kanban-remote"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+[assets]
+directory = "./public"
+run_worker_first = false
+
+[[kv_namespaces]]
+binding = "BOARDS"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"

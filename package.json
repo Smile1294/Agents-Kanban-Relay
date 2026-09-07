@@ -1,0 +1,14 @@
+{
+  "name": "agents-kanban-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The relay that Agents Kanban pushes its board to — runs on Netlify, Cloudflare Workers or any Node server. This repository is the deployable relay, split out of the extension repo (../Agents-Kanban/), which pins the shared rules in remote-contract.json.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node tests/handler.test.mjs && node tests/worker.test.mjs && node tests/server.test.mjs && node tests/viewer.test.mjs && node tests/contract.test.mjs && node --check functions/board.mjs && node --check functions/board-core.mjs && node --check server.js && node --check worker.js && node --check public/board.js"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^11.0.3"
+  }
+}

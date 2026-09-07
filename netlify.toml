@@ -1,0 +1,15 @@
+# The remote board relay. Netlify installs the dependencies from
+# package.json during the build and discovers the function automatically.
+[functions]
+  directory = "functions"
+
+[build]
+  publish = "public"
+
+# One API path for every host: the extension and the page talk to /board, and
+# Netlify rewrites that to its function (the worker and the Node server route
+# the same path directly — see README.md).
+[[redirects]]
+  from = "/board"
+  to = "/.netlify/functions/board"
+  status = 200
