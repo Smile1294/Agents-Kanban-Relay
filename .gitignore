@@ -4,3 +4,7 @@ node_modules/
 # The plain-Node server's board store (server.js).
 data/
 .wrangler/
+
+# Agents Kanban: one git worktree per agent session lives under here.
+# Generated, never yours — safe to delete when no session is running.
+/.agentskanban/
