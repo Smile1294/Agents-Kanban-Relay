@@ -16,7 +16,7 @@
 import { promises as fs } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import * as path from 'node:path'
-import { ID_OK, KEY_OK, NONCE_OK, CMD_MAX, CMD_TEXT_MAX } from '../functions/board-core.mjs'
+import { ID_OK, KEY_OK, NONCE_OK, SETTING_OK, THINKING_OK, CMD_MAX, CMD_TEXT_MAX } from '../functions/board-core.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const CONTRACT = JSON.parse(await fs.readFile(path.join(HERE, '..', 'remote-contract.json'), 'utf8'))
@@ -32,6 +32,8 @@ ok(typeof CONTRACT.payload === 'string' && CONTRACT.payload.length > 200,
 ok(ID_OK.source === CONTRACT.idOk, 'idOk is ID_OK — the 24-hex board-address rule')
 ok(KEY_OK.source === CONTRACT.keyOk, 'keyOk is KEY_OK — the session-key rule')
 ok(NONCE_OK.source === CONTRACT.nonceOk, 'nonceOk is NONCE_OK — the ack-handle rule')
+ok(SETTING_OK.source === CONTRACT.settingOk, 'settingOk is SETTING_OK — the model/effort id rule')
+ok(THINKING_OK.source === CONTRACT.thinkingOk, 'thinkingOk is THINKING_OK — the thinking mode rule')
 ok(CMD_MAX === CONTRACT.cmdMax, 'cmdMax is CMD_MAX — the queue bound')
 ok(CMD_TEXT_MAX === CONTRACT.cmdTextMax, 'cmdTextMax is CMD_TEXT_MAX — the per-command text cap')
 

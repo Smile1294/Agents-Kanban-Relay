@@ -39,6 +39,13 @@ export const CMD_MAX = 20
 /** How long one command's text may be. A prompt is a prompt; a 2MB string is
  *  an attack on the store. */
 export const CMD_TEXT_MAX = 20_000
+/** A model id or effort level a command may carry. Ids and keys only — never a
+ *  provider, an account, or a credential; the extension decides what the
+ *  string MEANS, the relay only keeps it short and blob-safe. */
+export const SETTING_OK = /^[A-Za-z0-9._-]{1,120}$/
+/** The two thinking modes the extension understands. A closed set, so a command
+ *  cannot smuggle a flag the host would then have to interpret. */
+export const THINKING_OK = /^(enabled|disabled)$/
 const indexBlob = (id) => `i:${id}`
 const tailBlob = (id, key) => `t:${id}:${key}`
 const cmdBlob = (id) => `c:${id}`
@@ -124,13 +131,34 @@ export async function handle(req, store) {
         if (!sessions) return fail(400, 'no board here yet — the extension has not pushed')
         if (!(session in sessions)) return fail(400, 'no such session on this board')
       }
+      // The optional model / effort / thinking the watcher picked. Validated for
+      // shape only — the relay queues them, the extension decides whether they
+      // are meaningful. A wrong-shaped value is refused rather than stored.
+      const model = body.model
+      if (model !== undefined && (typeof model !== 'string' || !SETTING_OK.test(model))) {
+        return fail(400, 'not a model id')
+      }
+      const effort = body.effort
+      if (effort !== undefined && (typeof effort !== 'string' || !SETTING_OK.test(effort))) {
+        return fail(400, 'not an effort level')
+      }
+      const thinking = body.thinking
+      if (thinking !== undefined && (typeof thinking !== 'string' || !THINKING_OK.test(thinking))) {
+        return fail(400, 'thinking must be enabled or disabled')
+      }
       const pending = await pendingCommands(store, id)
       // The same nonce twice is a retry after a lost answer, not two commands.
       if (pending.some((c) => c && c.nonce === nonce)) return ok({ ok: true })
       if (pending.length >= CMD_MAX) {
         return fail(429, 'the command queue is full — wait for the extension to catch up')
       }
-      pending.push({ nonce, text, ...(session !== undefined ? { session } : {}) })
+      pending.push({
+        nonce, text,
+        ...(session !== undefined ? { session } : {}),
+        ...(model !== undefined ? { model } : {}),
+        ...(effort !== undefined ? { effort } : {}),
+        ...(thinking !== undefined ? { thinking } : {}),
+      })
       await storeCommands(store, id, pending)
       return ok({ ok: true })
     }
