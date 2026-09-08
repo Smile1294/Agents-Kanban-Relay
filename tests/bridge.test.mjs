@@ -22,6 +22,7 @@ import { promises as fs } from 'node:fs'
 import * as path from 'node:path'
 import vm from 'node:vm'
 import { fileURLToPath } from 'node:url'
+import { composePatch } from '../functions/board-core.mjs'
 import { makeNode, walk } from './dom.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -63,9 +64,10 @@ async function boot({ id = '', hash = '', router } = {}) {
   const storage = new Map()
   if (id) storage.set('agents-kanban.remote', JSON.stringify({ id }))
 
+  const dispatched = []   // everything the bridge handed board.js, in order
   const win = {
     addEventListener: (t, fn) => { if (t === 'message') listeners.push(fn) },
-    postMessage: (data) => { for (const fn of listeners) fn({ data }) },
+    postMessage: (data) => { dispatched.push(data); for (const fn of listeners) fn({ data }) },
     open: () => null,
   }
   win.window = win
@@ -133,7 +135,17 @@ async function boot({ id = '', hash = '', router } = {}) {
   vm.runInContext(bridgeSrc, win, { filename: 'bridge.js' })
   vm.runInContext(boardSrc, win, { filename: 'board.js' })
   await settle()
-  return { root, body, win, fetched, listeners, timers, storage }
+  return { root, body, win, fetched, listeners, timers, storage, dispatched }
+}
+
+/** Run the poll the bridge armed, and let its fetch chain settle. The timers
+ *  are captured rather than run, so a test decides when the next poll happens. */
+async function pollAgain(h) {
+  const due = h.timers.splice(0)
+  for (const t of due) t.fn()
+  await settle()
+  await settle()
+  await settle()
 }
 
 const ctlLabels = (root) => walk(root)
@@ -264,6 +276,117 @@ const postedMsg = (fetched, type) => fetched.filter((f) =>
   const answers = postedMsg(h.fetched, 'remote.dialog')
   ok(answers.length === 1 && answers[0].body.msg.id === 'd1' && answers[0].body.msg.answer === 'Delete',
     'answering the dialog posts { type:"remote.dialog", id, answer }')
+}
+
+// --- patch frames: the page rebuilds the whole board board.js expects ---------
+//
+// 97% of a frame is the transcript and it barely changes, so a push carries the
+// board minus its transcript plus the rows that moved. board.js is the
+// extension's own file, carried byte-for-byte — it must never learn that the
+// transport got cleverer, so the bridge composes and dispatches the same whole
+// `{type:'state', state}` it always did.
+
+/** The state the bridge last handed board.js, read off the window messages. */
+const lastDispatched = (h) => {
+  const states = h.dispatched.filter((d) => d && d.type === 'state')
+  return states.length ? states[states.length - 1].state : null
+}
+
+{
+  const T0 = [{ kind: 'text', text: 'row 0' }, { kind: 'text', text: 'row 1' }]
+  const full = () => ({
+    type: 'state',
+    state: { ...JSON.parse(JSON.stringify(sample.state)), mode: 'chat', transcript: JSON.parse(JSON.stringify(T0)) },
+  })
+  const patch = {
+    base: 1,
+    state: { ...JSON.parse(JSON.stringify(sample.state)), mode: 'chat', running: 7 },
+    rows: { from: 2, rows: [{ kind: 'text', text: 'row 2' }] },
+  }
+  delete patch.state.transcript
+
+  let call = 0
+  const router = (url) => {
+    if (url.includes('models=1')) return resp(200, { ok: true, mv: 'v1', models: MODELS })
+    call++
+    if (call === 1) return resp(200, { ok: true, seq: 1, at: Date.now(), writes: true, mv: 'v1', frame: full(), events: [] })
+    return resp(200, { ok: true, seq: 2, at: Date.now(), writes: true, mv: 'v1', deltas: [patch], events: [] })
+  }
+  const h = await boot({ id: ID, router })
+  ok(!h.fetched[0].url.includes('d=1'),
+    'the first poll does NOT ask for patches — there is nothing yet to apply one to')
+  await pollAgain(h)
+
+  const state = lastDispatched(h)
+  ok(!!state && Array.isArray(state.transcript) && state.transcript.length === 3,
+    'a patch is composed onto what the page holds — board.js gets all 3 rows, not 1')
+  ok(state.transcript[0].text === 'row 0' && state.transcript[2].text === 'row 2',
+    '…with the rows above the splice the ones it already had')
+  ok(state.running === 7, '…and the rest of the board is the patch’s own')
+  ok(state.composer && Array.isArray(state.composer.models),
+    'the catalogue is re-attached to a patched state, exactly as to a whole frame')
+  ok(h.fetched.some((f) => f.method === 'GET' && f.url.includes('d=1')),
+    'once it holds a board, the page says it can apply patches')
+}
+
+{
+  // The relay and the page each compose patches, either side of a network, and
+  // neither can import the other. This is the only thing that keeps them
+  // honest: the SAME inputs through both must give the same board.
+  const base = { ready: true, mode: 'chat', selectedKey: 'a', cards: [],
+    transcript: [{ kind: 'text', text: 'a' }, { kind: 'text', text: 'b' }],
+    composer: JSON.parse(JSON.stringify(sample.state.composer)), running: 0, waiting: 0 }
+  const cases = [
+    { name: 'a row appended', patch: { base: 1, state: { ...base, running: 1 }, rows: { from: 2, rows: [{ kind: 'text', text: 'c' }] } } },
+    { name: 'the last row grew', patch: { base: 1, state: { ...base, running: 2 }, rows: { from: 1, rows: [{ kind: 'text', text: 'bb' }] } } },
+    { name: 'no rows at all', patch: { base: 1, state: { ...base, running: 3 } } },
+    { name: 'the transcript emptied', patch: { base: 1, state: { ...base, running: 4 }, rows: { from: 0, rows: [] } } },
+  ]
+  for (const c of cases) {
+    delete c.patch.state.transcript
+    const relaySide = composePatch({ type: 'state', state: base }, c.patch)
+
+    let call = 0
+    const router = (url) => {
+      if (url.includes('models=1')) return resp(200, { ok: true, mv: 'v1', models: MODELS })
+      call++
+      if (call === 1) {
+        return resp(200, { ok: true, seq: 1, at: Date.now(), writes: true, mv: 'v1',
+          frame: { type: 'state', state: JSON.parse(JSON.stringify(base)) }, events: [] })
+      }
+      return resp(200, { ok: true, seq: 2, at: Date.now(), writes: true, mv: 'v1', deltas: [c.patch], events: [] })
+    }
+    const h = await boot({ id: ID, router })
+    await pollAgain(h)
+    const pageSide = lastDispatched(h)
+    // The catalogue is re-attached on the page and never travels in a patch,
+    // so it is not part of the comparison.
+    const strip = (s) => { const o = JSON.parse(JSON.stringify(s)); if (o.composer) delete o.composer.models; return o }
+    ok(JSON.stringify(strip(pageSide)) === JSON.stringify(strip(relaySide.state)),
+      `relay and page compose "${c.name}" to the same board`)
+  }
+}
+
+{
+  // A patch with nothing to apply it to. Rendering a guess would show a
+  // transcript that is subtly not the board's, so the page drops its cursor and
+  // takes the whole board next time.
+  const patch = { base: 1, state: { ready: true, mode: 'chat', cards: [] }, rows: { from: 0, rows: [] } }
+  let call = 0
+  const urls = []
+  const router = (url) => {
+    if (url.includes('models=1')) return resp(200, { ok: true, mv: 'v1', models: MODELS })
+    urls.push(url)
+    call++
+    if (call === 1) return resp(200, { ok: true, seq: 5, at: Date.now(), writes: true, mv: 'v1', deltas: [patch], events: [] })
+    return resp(200, { ok: true, seq: 6, at: Date.now(), writes: true, mv: 'v1', frame: chatFrame(), events: [] })
+  }
+  const h = await boot({ id: ID, router })
+  ok(lastDispatched(h) === null, 'a patch with no board to apply it to renders NOTHING')
+  await pollAgain(h)
+  ok(!urls[1].includes('since='),
+    '…and the next poll drops the cursor, so the relay sends the whole board')
+  ok(!!lastDispatched(h), '…which it then draws')
 }
 
 // --- a refused action SAYS so, and is retried once ----------------------------

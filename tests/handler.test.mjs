@@ -6,7 +6,7 @@
  * names, the monotonic clock, the frame's replace-not-merge, the event ring's
  * retention, the message queue's validation, and every GET shape.
  */
-import { handle, ID_OK, NONCE_OK, TYPE_OK, MSG_MAX, MSG_MAX_BYTES, FRAME_MAX_BYTES, EVENTS_MAX } from '../functions/board-core.mjs'
+import { handle, composePatch, ID_OK, NONCE_OK, TYPE_OK, MSG_MAX, MSG_MAX_BYTES, FRAME_MAX_BYTES, EVENTS_MAX, DELTAS_MAX } from '../functions/board-core.mjs'
 
 let fails = 0
 const ok = (c, m) => { if (!c) { console.error('FAIL:', m); fails++ } else console.log('ok:', m) }
@@ -258,6 +258,134 @@ const postMsg = (store, nonce, msg, extra = {}) => post(store, {
   ok(Array.isArray(r.json.msgs) && r.json.msgs.length === 1 && r.json.msgs[0].nonce === 'n1',
     'a frame answer carries the pending messages')
   ok(JSON.parse(store.map.get(`q:${ID}`)).length === 1, 'delivery does not remove — only an ack does')
+}
+
+// --- patch frames: the transcript travels once -------------------------------
+//
+// 97% of a frame is the transcript (measured: 274 KB of a 282 KB frame on a
+// 400-row session) and it is almost entirely immutable, so a push may carry the
+// board minus its transcript plus the rows that changed. The relay COMPOSES
+// each patch onto the frame it stores as well as keeping it — that is what lets
+// a page joining mid-stream, or one that has fallen past the ring, always be
+// handed a whole board rather than fragments it cannot place.
+
+const rows = (n, tail = '') => Array.from({ length: n }, (_, i) => ({ kind: 'text', text: 'row ' + i + tail }))
+const chat = (n, over = {}) => ({ ready: true, mode: 'chat', selectedKey: 'a', cards: [], transcript: rows(n), ...over })
+const patchBody = (base, over = {}) => ({
+  kind: 'frame', at: 2000, writes: true, mv: 'v1',
+  patch: { base, state: { ready: true, mode: 'chat', selectedKey: 'a', cards: [], running: 1 }, ...over },
+})
+
+{
+  const store = fakeStore()
+  const first = await post(store, { body: { ...frameBody(), state: chat(3) } })
+  ok(first.json.patches === true, 'every frame answer says whether this relay speaks patches')
+  ok(first.json.frameSeq === 1, 'and names the seq it stored the frame under — the base for the next patch')
+
+  const applied = await handle({
+    method: 'POST', boardId: ID, key: ID,
+    body: patchBody(1, { rows: { from: 3, rows: [{ kind: 'text', text: 'row 3' }] } }),
+  }, store)
+  ok(applied.json.needFrame === undefined, 'a patch naming the held frame is accepted')
+  ok(applied.json.frameSeq === 2, 'and the answer names the new base')
+
+  const stored = JSON.parse(store.map.get(`f:${ID}`))
+  ok(stored.frame.state.transcript.length === 4,
+    'the relay COMPOSES the patch onto the frame it holds — 4 rows, not 1')
+  ok(stored.frame.state.transcript[0].text === 'row 0' && stored.frame.state.transcript[3].text === 'row 3',
+    'the rows above the splice are the ones it already had')
+  ok(stored.frame.state.running === 1, 'and the rest of the board is the patch’s own')
+}
+
+{
+  const store = fakeStore()
+  await post(store, { body: { ...frameBody(), state: chat(3) } })
+  const stale = await handle({ method: 'POST', boardId: ID, key: ID, body: patchBody(99) }, store)
+  ok(stale.json.needFrame === true,
+    'a patch naming a frame the relay is NOT holding is refused, never guessed at')
+  const stored = JSON.parse(store.map.get(`f:${ID}`))
+  ok(stored.frame.state.transcript.length === 3, '…and nothing is stored: the board is untouched')
+  ok(stored.seq === 1, '…and seq does not move, so no watcher is told there was news')
+}
+
+{
+  const store = fakeStore()
+  const empty = await handle({ method: 'POST', boardId: ID, key: ID, body: patchBody(0) }, store)
+  ok(empty.json.needFrame === true, 'a patch to a board with no frame at all is refused')
+}
+
+{
+  const store = fakeStore()
+  await post(store, { body: { ...frameBody(), state: chat(3) } })
+  await handle({ method: 'POST', boardId: ID, key: ID,
+    body: patchBody(1, { rows: { from: 3, rows: [{ kind: 'text', text: 'row 3' }] } }) }, store)
+  ok(JSON.parse(store.map.get(`d:${ID}`)).length === 1, 'the patch is kept as well as composed')
+  await post(store, { body: { ...frameBody(), state: chat(9) } })
+  ok(store.map.get(`d:${ID}`) === undefined,
+    'a whole state RESETS the ring — every retained patch describes a chain that leads nowhere')
+}
+
+{
+  // A patch whose splice starts past the end of what the relay holds cannot be
+  // placed: it would leave a hole in the transcript.
+  const store = fakeStore()
+  await post(store, { body: { ...frameBody(), state: chat(3) } })
+  const holed = await handle({ method: 'POST', boardId: ID, key: ID,
+    body: patchBody(1, { rows: { from: 8, rows: [{ kind: 'text', text: 'x' }] } }) }, store)
+  ok(holed.json.needFrame === true, 'a splice that would leave a gap is refused')
+}
+
+// --- GET: patches for a caller that asked, the whole board for one that did not
+
+{
+  const store = fakeStore()
+  await post(store, { body: { ...frameBody(), state: chat(3) } })
+  await handle({ method: 'POST', boardId: ID, key: ID,
+    body: patchBody(1, { rows: { from: 3, rows: [{ kind: 'text', text: 'row 3' }] } }) }, store)
+
+  const old = await handle({ method: 'GET', boardId: ID, since: 1 }, store)
+  ok(old.json.frame && !old.json.deltas,
+    'a caller that did not ask for patches gets the whole composed frame — an old page is safe')
+  ok(old.json.frame.state.transcript.length === 4, '…and it is the CURRENT board, composed')
+
+  const asked = await handle({ method: 'GET', boardId: ID, since: 1, deltas: true }, store)
+  ok(asked.json.deltas && asked.json.deltas.length === 1 && !asked.json.frame,
+    'a caller that asked, and whose cursor the chain reaches, gets the patch alone')
+
+  const fresh = await handle({ method: 'GET', boardId: ID, deltas: true }, store)
+  ok(fresh.json.frame && !fresh.json.deltas,
+    'a first load gets the whole board however it asks — there is nothing to apply a patch to')
+}
+
+{
+  const store = fakeStore()
+  await post(store, { body: { ...frameBody(), state: chat(3) } })
+  // Fall further behind than the ring retains.
+  for (let i = 0; i < DELTAS_MAX + 5; i++) {
+    const clock = JSON.parse(store.map.get(`s:${ID}`))
+    await handle({ method: 'POST', boardId: ID, key: ID,
+      body: patchBody(clock.frameSeq, { rows: { from: 3 + i, rows: [{ kind: 'text', text: 'r' + i }] } }) }, store)
+  }
+  ok(JSON.parse(store.map.get(`d:${ID}`)).length === DELTAS_MAX, 'the ring is bounded')
+  const behind = await handle({ method: 'GET', boardId: ID, since: 1, deltas: true }, store)
+  ok(behind.json.frame && !behind.json.deltas,
+    'a caller further behind than the ring gets the whole board, never a chain with a hole in it')
+  ok(behind.json.frame.state.transcript.length === 3 + DELTAS_MAX + 5,
+    '…and that board is complete, because the relay composed as it went')
+}
+
+{
+  // Events bump seq too, so a caller's cursor need not equal any patch's base.
+  const store = fakeStore()
+  await post(store, { body: { ...frameBody(), state: chat(3) } })
+  await handle({ method: 'POST', boardId: ID, key: ID,
+    body: { kind: 'event', events: [{ type: 'searchResults' }] } }, store)
+  const cursor = JSON.parse(store.map.get(`s:${ID}`)).seq
+  await handle({ method: 'POST', boardId: ID, key: ID,
+    body: patchBody(1, { rows: { from: 3, rows: [{ kind: 'text', text: 'row 3' }] } }) }, store)
+  const got = await handle({ method: 'GET', boardId: ID, since: cursor, deltas: true }, store)
+  ok(got.json.deltas && got.json.deltas.length === 1,
+    'a cursor moved on by an EVENT still resolves to the right patch — the chain is checked by base')
 }
 
 // --- concurrent requests are serialised per board ----------------------------

@@ -17,7 +17,7 @@ import { promises as fs } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import * as path from 'node:path'
 import {
-  ID_OK, NONCE_OK, TYPE_OK, MSG_MAX, MSG_MAX_BYTES, FRAME_MAX_BYTES, EVENTS_MAX, FN_PATH,
+  ID_OK, NONCE_OK, TYPE_OK, MSG_MAX, MSG_MAX_BYTES, FRAME_MAX_BYTES, EVENTS_MAX, DELTAS_MAX, FN_PATH,
 } from '../functions/board-core.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -26,7 +26,7 @@ const CONTRACT = JSON.parse(await fs.readFile(path.join(HERE, '..', 'remote-cont
 let fails = 0
 const ok = (c, m) => { if (!c) { console.error('FAIL:', m); fails++ } else console.log('ok:', m) }
 
-ok(CONTRACT.version === 2, 'the contract is v2 — this is the board-webview contract, not v1')
+ok(CONTRACT.version === 3, 'the contract is v3 — the board-webview contract with frame patches')
 ok(typeof CONTRACT.payload === 'string' && CONTRACT.payload.length > 200,
   'the payload paragraph says what the API is, in words a human can check')
 
@@ -38,6 +38,7 @@ ok(MSG_MAX === CONTRACT.msgMax, 'msgMax is MSG_MAX — the queue bound')
 ok(MSG_MAX_BYTES === CONTRACT.msgMaxBytes, 'msgMaxBytes is MSG_MAX_BYTES — the per-message JSON cap')
 ok(FRAME_MAX_BYTES === CONTRACT.frameMaxBytes, 'frameMaxBytes is FRAME_MAX_BYTES — the per-frame JSON cap')
 ok(EVENTS_MAX === CONTRACT.eventsMax, 'eventsMax is EVENTS_MAX — the event-ring bound')
+ok(DELTAS_MAX === CONTRACT.deltasMax, 'deltasMax is DELTAS_MAX — the frame-patch ring bound')
 ok(FN_PATH === CONTRACT.fnPath, 'fnPath is FN_PATH — the one API path every host serves')
 
 // The route path: fnPath is what the extension pushes to and the page fetches.

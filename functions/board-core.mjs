@@ -52,6 +52,16 @@ export const MSG_MAX_BYTES = 4_000_000
 export const FRAME_MAX_BYTES = 4_000_000
 /** How many host→page events the ring retains, oldest dropped. */
 export const EVENTS_MAX = 50
+/**
+ * How many frame PATCHES the ring retains, oldest dropped.
+ *
+ * A page that has fallen further behind than this gets the composed frame
+ * instead — always available, because the relay composes every patch onto the
+ * frame it stores rather than only logging them. That is the property that
+ * makes patches safe: there is no state in which the relay can only offer a
+ * page fragments it cannot place.
+ */
+export const DELTAS_MAX = 40
 /** The one API path every host serves (also the route each host routes). */
 export const FN_PATH = '/board'
 
@@ -97,6 +107,7 @@ function serialise(id, fn) {
  *  it before anything else, so a cheap poll costs one read. */
 const clockBlob = (id) => `s:${id}`
 const frameBlob = (id) => `f:${id}`
+const deltasBlob = (id) => `d:${id}`
 const modelsBlob = (id) => `m:${id}`
 const eventsBlob = (id) => `e:${id}`
 const queueBlob = (id) => `q:${id}`
@@ -107,6 +118,45 @@ export const fail = (status, error) => ({ status, json: { ok: false, error } })
 
 /** A fresh clock — the state of a board nothing has been pushed to yet. */
 const emptyClock = () => ({ seq: 0, at: 0, writes: false, mv: '', viewerAt: 0, frameSeq: 0 })
+
+/** The patch ring — `[{ seq, base, patch }]`, oldest first. Missing = empty. */
+async function readDeltas(store, id) {
+  const parsed = await readJson(store, deltasBlob(id))
+  return Array.isArray(parsed) ? parsed : []
+}
+
+/**
+ * Compose a patch onto the frame the relay is holding.
+ *
+ * The ONLY thing this module knows about a board's shape, and deliberately the
+ * smallest thing that works: `state` is the whole board minus its transcript,
+ * and `rows` replaces the transcript from `from` onwards. 97% of a frame is
+ * that transcript and it is almost entirely immutable — Claude Code fixes
+ * history when a run starts and appends after it — so re-sending it on every
+ * push was 8.7 MB a minute out of the machine and the same into every phone.
+ *
+ * Composing HERE rather than only logging the patch is what keeps the relay
+ * honest: the stored frame is always a complete board, so a page that joins
+ * mid-stream, or has fallen past the ring, gets one — it is never handed
+ * fragments it cannot place. The mirror of this function is `applyPatch` in
+ * `public/bridge.js`; `tests/handler.test.mjs` drives both over the same
+ * inputs and fails if they disagree.
+ */
+export function composePatch(frame, patch) {
+  const prev = frame && frame.state ? frame.state : null
+  if (!prev || !patch || typeof patch !== 'object' || !patch.state) return null
+  const state = { ...patch.state }
+  const rows = patch.rows
+  if (rows) {
+    if (!Array.isArray(rows.rows) || !Number.isInteger(rows.from) || rows.from < 0) return null
+    const base = Array.isArray(prev.transcript) ? prev.transcript : []
+    if (rows.from > base.length) return null
+    state.transcript = base.slice(0, rows.from).concat(rows.rows)
+  } else if (Array.isArray(prev.transcript)) {
+    state.transcript = prev.transcript
+  }
+  return { type: 'state', state }
+}
 
 /** Read a JSON blob, or null. A half-written or unparseable blob reads as
  *  absent — every one of these is disposable state, and a broken blob must not
@@ -201,7 +251,7 @@ async function route(req, id, store) {
     if (req.models) return getModels(store, id)
     if (req.msgs) return getMsgs(store, id)
     const since = Number.isFinite(req.since) ? req.since : undefined
-    return getBoard(store, id, since)
+    return getBoard(store, id, since, req.deltas === true)
   }
 
   return fail(405, 'only GET and POST are served')
@@ -221,16 +271,49 @@ async function postFrame(store, id, body) {
   const mv = typeof body.mv === 'string' ? body.mv : ''
   const at = Number.isFinite(body.at) ? body.at : Date.now()
   const hasState = body.state !== undefined && body.state !== null
+  const hasPatch = body.patch !== undefined && body.patch !== null
   const hasModels = body.models !== undefined && body.models !== null
 
   const clock = (await readClock(store, id)) || emptyClock()
+  // `patches` is how the pusher LEARNS this relay speaks them — it never
+  // assumes, because a v2 relay handed a patch would store nothing and the
+  // board would silently stop moving. Always answered, on every frame POST.
+  const answer = { ok: true, patches: true, mv, viewerAt: clock.viewerAt }
+  let needFrame = false
 
   if (hasState) {
     const frame = { type: 'state', state: body.state }
     clock.seq += 1
     clock.frameSeq = clock.seq
     await store.set(frameBlob(id), JSON.stringify({ seq: clock.seq, frame }))
+    // A whole state RESETS the ring: every retained patch describes a chain
+    // that no longer leads anywhere, and a page holding one of them would
+    // splice it into a board it was never built against.
+    await store.delete(deltasBlob(id))
+  } else if (hasPatch) {
+    // A patch is only applied to the frame it names. Anything else — the relay
+    // restarted, another writer got in first, this end lost track — and the
+    // honest answer is "send me a frame", never a best guess.
+    const held = await readJson(store, frameBlob(id))
+    const composed = held && body.patch.base === clock.frameSeq
+      ? composePatch(held.frame, body.patch)
+      : null
+    if (!composed) {
+      needFrame = true
+    } else {
+      clock.seq += 1
+      const base = clock.frameSeq
+      clock.frameSeq = clock.seq
+      await store.set(frameBlob(id), JSON.stringify({ seq: clock.seq, frame: composed }))
+      // The patch is kept as well as composed, so a page that is only a few
+      // frames behind can be sent the rows rather than the board.
+      const ring = await readDeltas(store, id)
+      ring.push({ seq: clock.seq, base, patch: body.patch })
+      while (ring.length > DELTAS_MAX) ring.shift()
+      await store.set(deltasBlob(id), JSON.stringify(ring))
+    }
   }
+
   if (hasModels) {
     await store.set(modelsBlob(id), JSON.stringify({ mv, models: body.models }))
   }
@@ -239,7 +322,11 @@ async function postFrame(store, id, body) {
   clock.mv = mv
   await writeClock(store, id, clock)
 
-  return ok({ ok: true, mv, viewerAt: clock.viewerAt, msgs: await readQueue(store, id) })
+  answer.viewerAt = clock.viewerAt
+  answer.frameSeq = clock.frameSeq
+  if (needFrame) answer.needFrame = true
+  answer.msgs = await readQueue(store, id)
+  return ok(answer)
 }
 
 /* --- POST: the host→page events -------------------------------------------- */
@@ -319,15 +406,16 @@ async function postAck(store, id, body) {
  *  it is newer than `since`, and events newer than `since` (with `gap` when
  *  the caller is older than the retained ring). A GET with `since` also counts
  *  as viewer presence, throttled to one clock write per 20 s. */
-async function getBoard(store, id, since) {
+async function getBoard(store, id, since, wantsDeltas) {
   const clock = await readClock(store, id)
   if (!clock) return fail(404, 'no board here yet — waiting for the first push from the extension')
 
   const base = { ok: true, seq: clock.seq, at: clock.at, writes: clock.writes, mv: clock.mv }
 
   if (since === undefined) {
-    // First load: the whole picture — latest frame, no events (they are new
-    // only from the caller's cursor, and there is none yet).
+    // First load: the whole picture — the latest COMPOSED frame, no events
+    // (they are new only from the caller's cursor, and there is none yet).
+    // Never patches: a caller with no cursor has nothing to apply them to.
     let frame = null
     const raw = await store.get(frameBlob(id))
     if (raw) {
@@ -362,12 +450,32 @@ async function getBoard(store, id, since) {
   }
 
   let frame = null
+  let deltas = null
   if (clock.frameSeq > since) {
-    const parsed = await readJson(store, frameBlob(id))
-    frame = parsed && parsed.frame ? parsed.frame : null
+    // A caller that says it can apply patches gets them when the chain from
+    // its own cursor is complete — `ring[start].base <= since` is the proof:
+    // that patch's base frame is one the caller has already seen, and the
+    // entries after it are chained. Anything less and it gets the whole frame,
+    // which the relay always holds because it composes as it stores.
+    if (wantsDeltas) {
+      const ring = await readDeltas(store, id)
+      const start = ring.findIndex((d) => d.seq > since)
+      if (start >= 0 && ring[start].base <= since) {
+        deltas = ring.slice(start).map((d) => d.patch)
+      }
+    }
+    if (!deltas) {
+      const parsed = await readJson(store, frameBlob(id))
+      frame = parsed && parsed.frame ? parsed.frame : null
+    }
   }
 
-  return ok({ ...base, frame, events, ...(gap ? { gap: true } : {}) })
+  return ok({
+    ...base,
+    ...(deltas ? { deltas } : { frame }),
+    events,
+    ...(gap ? { gap: true } : {}),
+  })
 }
 
 /* --- GET: the model catalogue and the queue -------------------------------- */

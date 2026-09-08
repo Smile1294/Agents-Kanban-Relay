@@ -65,6 +65,9 @@ export default {
       wait: wait === null ? undefined : Number(wait),
       models: q.get('models') !== null,
       msgs: q.get('msgs') !== null,
+      // `d=1` — the caller can apply frame patches. Opt-in, so a page built
+      // against contract v2 is never handed one.
+      deltas: q.get('d') === '1',
       body,
     }, kvStore(env))
     return new Response(JSON.stringify(out.json), {

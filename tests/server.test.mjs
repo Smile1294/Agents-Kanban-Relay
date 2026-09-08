@@ -164,6 +164,72 @@ const s1 = await startServer(tmp)
   ok(json.longPoll === true && json.seq === 3, '…and it sees the new frame')
 }
 
+// --- patch frames over real HTTP ---------------------------------------------
+//
+// The 97%-of-a-frame transcript, sent once. Driven end to end here because the
+// query param, the answer fields and the composed frame each pass through a
+// different file (server.js builds the request, board-core composes, the ring
+// decides) and a unit test of any one of them would not notice the others.
+
+{
+  const BOARD = 'f'.repeat(24)
+  const rows = (n) => Array.from({ length: n }, (_, i) => ({ kind: 'text', text: 'row ' + i }))
+  const push = (body) => fetch(s1.base + '/board', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-rc-key': BOARD },
+    body: JSON.stringify(body),
+  }).then((r) => r.json())
+
+  const first = await push({
+    kind: 'frame', at: Date.now(), writes: true, mv: 'v1',
+    state: { ready: true, mode: 'chat', selectedKey: 'a', cards: [], transcript: rows(50) },
+  })
+  ok(first.patches === true, 'the host answers `patches` so a pusher can learn it speaks v3')
+  ok(first.frameSeq === 1, '…and names the base for the next patch')
+
+  const patched = await push({
+    kind: 'frame', at: Date.now(), writes: true, mv: 'v1',
+    patch: {
+      base: first.frameSeq,
+      state: { ready: true, mode: 'chat', selectedKey: 'a', cards: [], running: 1 },
+      rows: { from: 50, rows: [{ kind: 'text', text: 'row 50' }] },
+    },
+  })
+  ok(!patched.needFrame && patched.frameSeq === 2, 'a patch naming the held frame is composed')
+
+  const whole = await (await fetch(s1.base + `/board?id=${BOARD}`)).json()
+  ok(whole.frame.state.transcript.length === 51,
+    'a first load gets the COMPOSED board — 51 rows, though only one of them was ever pushed twice')
+
+  const asked = await (await fetch(s1.base + `/board?id=${BOARD}&since=1&d=1`)).json()
+  ok(Array.isArray(asked.deltas) && asked.deltas.length === 1 && !asked.frame,
+    'a page that asked for patches and can place them gets the patch, not the board')
+  const plain = await (await fetch(s1.base + `/board?id=${BOARD}&since=1`)).json()
+  ok(plain.frame && !plain.deltas, 'a page that did not ask still gets the whole board')
+
+  const stale = await push({
+    kind: 'frame', at: Date.now(), writes: true, mv: 'v1',
+    patch: { base: 999, state: { ready: true, mode: 'chat', cards: [] } },
+  })
+  ok(stale.needFrame === true, 'a patch the host cannot place is refused, over the wire as in the unit')
+
+  // The bytes, on the wire, for the thing this whole change exists for.
+  const bigRows = Array.from({ length: 400 }, (_, i) => ({ kind: 'text', text: 'Lorem ipsum dolor sit amet. '.repeat(12) + i }))
+  const keyframe = JSON.stringify({
+    kind: 'frame', at: 1, writes: true, mv: 'v1',
+    state: { ready: true, mode: 'chat', selectedKey: 'a', cards: [], transcript: bigRows },
+  })
+  const delta = JSON.stringify({
+    kind: 'frame', at: 1, writes: true, mv: 'v1',
+    patch: {
+      base: 1, state: { ready: true, mode: 'chat', selectedKey: 'a', cards: [], running: 1 },
+      rows: { from: 399, rows: [bigRows[399]] },
+    },
+  })
+  ok(delta.length * 20 < keyframe.length,
+    `a patch is at least 20x smaller on the wire (${delta.length} vs ${keyframe.length} bytes)`)
+}
+
 // --- concurrency: no write is lost, and none answers 500 ----------------------
 //
 // Every branch of board-core is a read-modify-write across `await` points, and

@@ -16,6 +16,13 @@ This repository is the relay, lifted out of the Agents-Kanban extension repo:
 self-contained, and deployable as is on any of the three hosts below. Nothing
 here runs on your machine unless you run it there on purpose.
 
+The board is pushed as **patches**, not as a fresh copy each time: 97% of a
+frame is the transcript and it barely changes, so a live agent costs a few
+kilobytes an update instead of a few hundred. Measured in a browser against the
+Node host — six seconds of a streaming agent on a 200-row conversation — the
+updates cost **16.6 KB rather than 526 KB**. See
+[docs/protocol.md](docs/protocol.md#frame-patches).
+
 ## What the page is
 
 The page is `media/board.js` — the extension's own webview script — copied
@@ -133,6 +140,10 @@ board*.
 - The page shows nothing until a code is entered, and only the board that code
   derives is reachable. There is no list of boards and no login to expire or
   be phished.
+- A patch carries the same board a whole frame does, in fewer bytes. It changes
+  what is *sent*, never what is *stored*: the relay composes every patch onto
+  the frame it holds, so `f:<id>` is always one complete board and nothing new
+  is retained anywhere.
 - **What travels changed with v2.** The old relay pushed a redacted card index;
   this one pushes the board itself, so worktree paths, branch names, tool
   *summaries* (a Bash row summarises as its command), review file lists and
@@ -205,7 +216,10 @@ READ-ONLY badge and the dropped-post toast.
 
 - `tests/handler.test.mjs` — `board-core.mjs` against a fake blob store: the
   write gate, the storage names, the monotonic clock, replace-not-merge, the
-  event ring, the message queue, and every GET shape.
+  event ring, the message queue, every GET shape, and frame patches — composed
+  onto the held frame, refused with `needFrame` when the base is not the one
+  held or the splice would leave a gap, the ring bounded and cleared by a whole
+  state, and a caller further behind than the ring handed the whole board.
 - `tests/worker.test.mjs` — the Cloudflare worker against a fake KV: the list
   mapping, the routing guard, and the new query params.
 - `tests/server.test.mjs` — the real Node server, spawned on an ephemeral port
@@ -224,7 +238,10 @@ READ-ONLY badge and the dropped-post toast.
   composer chips, the message queue, the READ-ONLY badge, remote dialogs, the
   oversize guard, and that an action the relay refuses SAYS so — retried once on
   a 5xx or a dropped connection (the nonce makes that idempotent), never on a
-  4xx, and a full queue named as the board not draining it.
+  4xx, and a full queue named as the board not draining it. It also drives the
+  page's `applyPatch` and the relay's `composePatch` over the SAME inputs and
+  fails if they disagree: the two live either side of a network and neither can
+  import the other, so this is the only thing keeping them honest.
 
 `tests/dom.mjs` is a full copy of the extension repo's `test/dom.mjs` — the
 stub DOM the extension's own webviews run against. When the extension's copy

@@ -1,4 +1,4 @@
-# Relay protocol — v2
+# Relay protocol — v3
 
 The relay carries the extension's **own board webview** over an asynchronous
 transport. The extension pushes the frames it would post to that webview; the
@@ -14,7 +14,7 @@ half of it.
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "payload": "…",
   "idOk": "^[0-9a-f]{24}$",
   "nonceOk": "^[A-Za-z0-9._-]{1,64}$",
@@ -23,6 +23,7 @@ half of it.
   "msgMaxBytes": 4000000,
   "frameMaxBytes": 4000000,
   "eventsMax": 50,
+  "deltasMax": 40,
   "fnPath": "/board"
 }
 ```
@@ -39,19 +40,25 @@ read **and** write (writes travel with the id as `x-rc-key`). The constants in
 | blob | content |
 |---|---|
 | `s:<id>` | the clock: `{ seq, at, writes, mv, viewerAt, frameSeq }`. `seq` is a monotonic counter bumped by every frame-with-state and every event. Read it FIRST on every GET — it is small. |
-| `f:<id>` | the latest frame: `{ seq, frame }`, `frame` = `{ type:'state', state }` exactly as pushed (the extension has already removed `state.composer.models`). |
+| `f:<id>` | the latest frame: `{ seq, frame }`, `frame` = `{ type:'state', state }` — as pushed, or COMPOSED from the patches since (the extension has already removed `state.composer.models`). Always a complete board. |
+| `d:<id>` | a ring of frame patches `[{ seq, base, patch }]`, at most `deltasMax`, oldest dropped, cleared by any whole state. |
 | `m:<id>` | the model catalogue: `{ mv, models }`. |
 | `e:<id>` | a ring of host→page events `[{ seq, msg }]`, at most `eventsMax`, oldest dropped. |
 | `q:<id>` | the queue of page→host messages `[{ nonce, at, msg }]`, at most `msgMax`, FIFO. |
 
 ## POST kinds
 
-- `{ kind:'frame', at, writes, mv, state?, models? }` — if `state` present:
-  store `f:` with `seq+1` and set `frameSeq`; if `models` present: store `m:` =
-  `{ mv, models }`; always update `at`, `writes` (boolean), `mv` (string, may be
+- `{ kind:'frame', at, writes, mv, state?, patch?, models? }` — if `state`
+  present: store `f:` with `seq+1`, set `frameSeq`, and DELETE `d:` (every
+  retained patch describes a chain that no longer leads anywhere). If `patch`
+  present instead: compose it onto `f:` and store the result the same way, and
+  append `{ seq, base, patch }` to `d:`. If `models` present: store `m:` =
+  `{ mv, models }`. Always update `at`, `writes` (boolean), `mv` (string, may be
   `''`). Refuse a body whose JSON text exceeds `frameMaxBytes` with 413. Answer
-  `{ ok:true, mv, viewerAt, msgs:[...pending] }` so a busy board picks up
-  messages on its own pushes.
+  `{ ok:true, patches:true, frameSeq, mv, viewerAt, msgs:[...pending] }` — the
+  pending messages so a busy board picks them up on its own pushes, `frameSeq`
+  so the pusher knows the base for its next patch, and `patches:true` so it
+  learns this relay understands them at all.
 - `{ kind:'event', events:[msg, ...] }` — each `msg` is an object whose `type`
   matches `typeOk`; append each with `seq+1`; keep at most `eventsMax`. Answer
   `{ ok:true, seq }`.
@@ -78,6 +85,70 @@ never the relay's. The relay only holds them.
   is older than the oldest retained event, return everything retained and add
   `gap: true`. A GET with `since` counts as viewer presence: update `viewerAt`
   in `s:`, but at most once per 20 s.
+- `&d=1` says the caller can apply frame patches. Then, when `frameSeq > N`,
+  `deltas` (the patches from `d:` with `seq > N`, oldest first) is returned
+  INSTEAD of `frame` — but only when the chain reaches the caller's cursor,
+  which is `ring[start].base <= N` for the first entry newer than `N`: that
+  patch's base frame is one the caller has already seen, and the entries after
+  it are chained to it. Otherwise the whole `frame` goes, as it always did.
+  Never on a first load (no `since`): there is nothing to apply a patch to.
+
+## Frame patches
+
+97% of a frame is the transcript, and it barely changes. Measured on a
+realistic board — 14 cards, a review panel, a full composer:
+
+| transcript | frame | of which transcript | everything else |
+|---|---|---|---|
+| 400 rows | 282 KB | 97.3% | 7.6 KB |
+| 100 rows | 76 KB | 90.1% | 7.6 KB |
+
+At one push per 2 s that was **8.7 MB a minute** out of the pushing machine and
+the same into every watching phone, to re-send a conversation that is almost
+entirely immutable — Claude Code fixes history when a run starts and only
+appends after it, the same property `media/board.js` already relies on for its
+own fast path.
+
+So a push may carry `patch` instead of `state`:
+
+```json
+{ "base": 12, "state": { "…the board without its transcript…" },
+  "rows": { "from": 399, "rows": ["…only what changed…"] } }
+```
+
+`state` is the whole board MINUS `transcript`, sent in full every time —
+diffing 7.6 KB generically would buy 3% and cost a merge algorithm that can be
+wrong in ways nobody would notice. `rows` replaces the transcript from `from`
+onwards, and is absent when the transcript did not move at all. `base` is the
+`frameSeq` the patch applies to.
+
+Measured over real HTTP, one row arriving on a 400-row board: **538 bytes
+against 146,018** for the same frame. End to end in a browser against the Node
+host, six seconds of a streaming agent on a 200-row board: the four updates
+cost **16.6 KB instead of 526 KB**, and the pushing machine posted **145 KB
+instead of 655 KB**.
+
+Four things are load-bearing:
+
+- **The relay COMPOSES, it does not only log.** `f:` is always a complete
+  board, so a page joining mid-stream — or one that has fallen past
+  `deltasMax` — is handed a whole frame. There is no state in which the relay
+  can only offer fragments a caller cannot place.
+- **A patch is REFUSABLE.** `base` must be the frame the relay is actually
+  holding and the splice must not leave a gap; otherwise the answer carries
+  `needFrame: true`, nothing is stored, `seq` does not move, and the pusher
+  sends a whole state next. An end that silently mis-applied a patch would
+  show a transcript that is subtly not the board's, which is worse than
+  sending 282 KB.
+- **Both ends OPT IN, neither assumes.** `patches: true` on the answer is how
+  a pusher learns the relay speaks v3 — a v2 relay handed a patch would store
+  nothing and the board would silently stop moving. `&d=1` is how a page says
+  it can apply one — a page built against v2 never receives one.
+- **The transcript's PRESENCE changing falls back to a whole state**, as do a
+  session switch and upward pagination. `rows` can say "these rows changed",
+  not "there is no transcript now", and inventing an encoding for a case that
+  happens on a click rather than on a token is how a format grows a corner
+  nobody tests.
 - `?id=X&models=1` → `{ ok, mv, models }` (404 when none).
 - `?id=X&msgs=1` → `{ ok, msgs, viewerAt }`.
 - `&wait=<secs>` (1..25): only the plain Node host honours it — hold the
@@ -105,6 +176,9 @@ Worker, which run many instances. Per board rather than global so one board's
 write cannot hold up another's poll. Measured before it existed: 200 concurrent
 posts to one board, 3 answered `200`, 40 in the queue.
 
+`functions/board.mjs`, `worker.js` and `server.js` all pass `d` through to
+`handle()` alongside `since`, `wait`, `models` and `msgs`.
+
 `server.js` bounds the request body at `BODY_MAX` (5 MB — a message may carry
 images) and serves a static whitelist that includes `/media/board.js`,
 `/media/board.css`, `/media/theme.css`, `/bridge.js` and `/bridge.css`.
@@ -113,8 +187,11 @@ through to `handle()`. `wrangler.toml` and `netlify.toml` are unchanged from the
 layout they already describe.
 
 > Cloudflare KV's free tier (1,000 writes/day) cannot carry a live board — a
-> frame every 2 s while an agent streams blows past it in minutes. Recommend
-> the plain Node host (true long-poll streaming) or Netlify.
+> frame every 2 s while an agent streams blows past it in minutes. Patches make
+> each write far SMALLER but add one more per push (the ring alongside the frame
+> and the clock), so they do not change that advice: KV's limit is on the count,
+> not the size. Recommend the plain Node host (true long-poll streaming) or
+> Netlify.
 
 ## The page (`public/`)
 
@@ -130,12 +207,18 @@ extension's `media/` changes). `public/index.html` loads them behind
 - **`acquireVsCodeApi()`** — `postMessage(msg)` becomes `POST /board`
   `{ kind:'msg', nonce: crypto.randomUUID(), msg }`, gated on `msgMaxBytes` and
   on the last envelope's `writes` flag.
-- **Polling** — `GET /board?id=<id>&since=<seq>`, adding `&wait=25` when the
-  last answer had `longPoll: true`; otherwise 2 s while fresh, 15 s quiet, 60 s
-  after 10 minutes quiet, 15 s after an error. On each answer, a new `mv` (or
-  the first frame of the page life) triggers `?models=1` first, the catalogue is
-  injected into `frame.state.composer.models`, and the frame is dispatched as a
-  `window` message — exactly the shape the webview expects.
+- **Polling** — `GET /board?id=<id>&since=<seq>`, adding `&d=1` once it holds a
+  board to apply patches to, and `&wait=25` when the last answer had
+  `longPoll: true`; otherwise 2 s while fresh, 15 s quiet, 60 s after 10 minutes
+  quiet, 15 s after an error. On each answer, a new `mv` (or the first frame of
+  the page life) triggers `?models=1` first, `deltas` are composed onto the
+  board the page holds (`applyPatch`, the mirror of the relay's
+  `composePatch`), the catalogue is injected into `state.composer.models`, and
+  the WHOLE state is dispatched as a `window` message — exactly the shape the
+  webview expects. `board.js` is the extension's own file carried byte-for-byte
+  and never learns that the transport got cleverer; a patch it cannot place
+  drops the cursor so the next poll returns the whole board, rather than
+  rendering a guess.
 - **Editor-only actions** (`openSettings`, `focus`, `openBoard`, `closeBoard`,
   `openFolder`) are intercepted and toast; `voiceStart`/`voiceStop` drive
   browser dictation (the transcript arrives later as a `voice` event).

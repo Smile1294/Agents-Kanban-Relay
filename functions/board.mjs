@@ -43,6 +43,9 @@ export default async (req) => {
     wait: wait === null ? undefined : Number(wait),
     models: q.get('models') !== null,
     msgs: q.get('msgs') !== null,
+    // `d=1` — the caller can apply frame patches. Opt-in, so a page built
+    // against contract v2 is never handed one.
+    deltas: q.get('d') === '1',
     body,
   }, store)
   return json(out.status, out.json)

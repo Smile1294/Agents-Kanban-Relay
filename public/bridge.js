@@ -54,6 +54,12 @@
   let catalogue = [] // the model catalogue, injected into frames like board.js would
   let cachedModelsMv = null // the mv of the catalogue we fetched
   let dispatchedFrame = false // has any frame been dispatched this page life?
+  /** The board as this page last knew it. A push carries a PATCH — the board
+   *  minus its transcript, plus the rows that changed — so the page keeps the
+   *  composed state and hands board.js the same whole `{type:'state', state}`
+   *  it has always been handed. board.js is the extension's file, carried
+   *  verbatim: it must never learn that the transport got cleverer. */
+  let lastState = null
   let longPoll = false // the last answer carried longPoll: true (Node host)
   let error = '' // the relay error text, when a poll failed
   let burstUntil = 0 // a post-send burst: poll fast until this instant
@@ -170,6 +176,10 @@
   function boardUrl() {
     let u = '/board?id=' + encodeURIComponent(id)
     if (seq !== null) u += '&since=' + seq
+    // `d=1` says this page can apply frame patches. Opt-in, so a relay serving
+    // an older page never hands it one; and only once there is something to
+    // apply them TO — a first load has no board yet.
+    if (seq !== null && lastState) u += '&d=1'
     if (longPoll) u += '&wait=25'
     return u
   }
@@ -244,17 +254,38 @@
     if (typeof json.writes === 'boolean') writes = json.writes
     if (typeof json.mv === 'string') mv = json.mv
 
+    let next = null
     if (json.frame) {
-      const frame = json.frame
-      if (frame.state && frame.state.composer) {
+      next = json.frame.state
+    } else if (Array.isArray(json.deltas) && json.deltas.length) {
+      // Patches apply to what this page already has. If it has nothing — a
+      // reload mid-stream, a relay that answered out of order — there is
+      // nothing honest to splice into, so drop the cursor and take the whole
+      // board on the next poll rather than rendering a guess.
+      next = lastState
+      for (const d of json.deltas) {
+        next = next ? applyPatch(next, d) : null
+        if (!next) break
+      }
+      if (!next) {
+        seq = null
+        lastState = null
+        renderStatus()
+        return
+      }
+    }
+
+    if (next) {
+      lastState = next
+      if (next.composer) {
         // Models ride separately; fetch them on the first frame of this page
         // life and whenever the catalogue's mv changes, then hand them to
         // board.js the way a full frame would (board.js keeps its catalogue
         // module-level, so a missing `models` means "the one you already have").
         if (!dispatchedFrame || cachedModelsMv !== mv) await fetchModels()
-        frame.state.composer.models = catalogue
+        next.composer.models = catalogue
       }
-      window.postMessage(frame, '*')
+      window.postMessage({ type: 'state', state: next }, '*')
       dispatchedFrame = true
     }
 
@@ -267,6 +298,34 @@
     }
 
     renderStatus()
+  }
+
+  /**
+   * Compose a patch onto the board this page is holding.
+   *
+   * The mirror of `composePatch` in the relay's `functions/board-core.mjs` —
+   * the relay composes so that a page joining mid-stream still gets a whole
+   * board, and this composes so board.js still gets one. Two copies because
+   * they live either side of a network and neither can import the other; the
+   * relay's `tests/handler.test.mjs` drives BOTH over the same inputs and
+   * fails if they disagree, which is the only thing that keeps them honest.
+   *
+   * Returns null when the patch cannot be placed — the caller then asks for
+   * the whole board rather than rendering an approximation of one.
+   */
+  function applyPatch(prev, patch) {
+    if (!prev || !patch || typeof patch !== 'object' || !patch.state) return null
+    const state = { ...patch.state }
+    const rows = patch.rows
+    if (rows) {
+      if (!Array.isArray(rows.rows) || !Number.isInteger(rows.from) || rows.from < 0) return null
+      const base = Array.isArray(prev.transcript) ? prev.transcript : []
+      if (rows.from > base.length) return null
+      state.transcript = base.slice(0, rows.from).concat(rows.rows)
+    } else if (Array.isArray(prev.transcript)) {
+      state.transcript = prev.transcript
+    }
+    return state
   }
 
   async function fetchModels() {
@@ -510,7 +569,7 @@
     const forget = document.createElement('button')
     forget.className = 'rc-forget'
     forget.textContent = 'Forget this board'
-    forget.addEventListener('click', () => { forgetId(); location.reload() })
+    forget.addEventListener('click', () => { forgetId(); lastState = null; location.reload() })
     wrap.append(forget)
 
     const err = document.createElement('div')
