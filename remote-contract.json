@@ -1,12 +1,12 @@
 {
-  "version": 1,
-  "payload": "Every host serves one API at fnPath. A board's address is the first 24 hex chars of the sha-256 of its pairing code; possession of the id is read AND write (writes travel with the id as x-rc-key). GET ?id=<boardId> returns { ok, index: { v: 1, at, writes?, composer?, columns[], sessions{} } }; GET ?id=<boardId>&tail=<session key> returns { ok, tail: { key, entries[] } }; GET ?id=<boardId>&cmds=1 returns { ok, cmds[] }. POST { kind: 'update', index, tails[] } REPLACES the index and every named tail, never merges, and garbage-collects tails whose session left the index; POST { kind: 'command', nonce, text, session?, model?, effort?, thinking? } queues a prompt for the pushing machine — bounded by cmdMax commands of cmdTextMax characters each, model/effort are settingOk-shaped ids and thinking is enabled|disabled, and whether one runs is the extension's decision, never the relay's; POST { kind: 'ack', nonces[] } removes acked commands (at-least-once). The static page and all three hosts (Netlify functions, Cloudflare Worker, plain Node) speak exactly this.",
+  "version": 2,
+  "payload": "Every host serves one API at fnPath. A board's address is the first 24 hex chars of the sha-256 of its pairing code; possession of the id is read AND write (writes travel with the id as x-rc-key). The relay carries the extension's own board webview: the page is media/board.js verbatim behind a bridge, the extension pushes the frames it would post to that webview, and the page queues the messages that webview would post back. GET ?id=<boardId>[&since=<seq>][&wait=<secs>] returns { ok, seq, at, writes, mv, frame?, events[] } — frame (the latest { type:'state', state } with state.composer.models split out) only when it is newer than since, events (host-to-page messages: searchResults, mentions, voice, remote dialogs and toasts) newer than since, at most eventsMax retained; wait is honoured only by hosts that can hold a request. GET ?id=<boardId>&models=1 returns { ok, mv, models[] }; GET ?id=<boardId>&msgs=1 returns { ok, msgs[], viewerAt }. POST { kind:'frame', at, writes, mv, state?, models? } REPLACES the frame (state absent = heartbeat, at only) and answers { ok, mv, viewerAt, msgs[] }; POST { kind:'event', events[] } appends host-to-page events; POST { kind:'msg', nonce, msg:{ type, ... } } queues one webview message for the pushing machine — msg.type matches typeOk, the JSON is at most msgMaxBytes, at most msgMax queued — and whether it runs is the extension's decision (remote.writes), never the relay's; POST { kind:'ack', nonces[] } removes acked messages (at-least-once). The static page and all three hosts (Netlify functions, Cloudflare Worker, plain Node) speak exactly this.",
   "idOk": "^[0-9a-f]{24}$",
-  "keyOk": "^[A-Za-z0-9._-]{1,80}$",
   "nonceOk": "^[A-Za-z0-9._-]{1,64}$",
-  "settingOk": "^[A-Za-z0-9._-]{1,120}$",
-  "thinkingOk": "^(enabled|disabled)$",
-  "cmdMax": 20,
-  "cmdTextMax": 20000,
+  "typeOk": "^[A-Za-z][A-Za-z0-9._-]{0,39}$",
+  "msgMax": 40,
+  "msgMaxBytes": 4000000,
+  "frameMaxBytes": 4000000,
+  "eventsMax": 50,
   "fnPath": "/board"
 }

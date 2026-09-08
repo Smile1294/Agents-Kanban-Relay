@@ -1,8 +1,9 @@
 /* The Cloudflare host, exercised against a fake KV — no account, no wrangler.
  * The worker is a store adapter plus a routing guard, so this pins the two
  * things that could silently break: KV's list shape (`keys: [{ name }]`) must
- * become board-core's (`blobs: [{ key }]`) or the orphan-tail GC dies quietly,
- * and everything that is not /board must not reach the relay.
+ * become board-core's (`blobs: [{ key }]`), and everything that is not /board
+ * must not reach the relay — plus the new v2 query params (`since`, `models`,
+ * `msgs`, `wait`) passing through to handle().
  */
 import worker, { kvStore } from '../worker.js'
 
@@ -29,14 +30,13 @@ function fakeKV() {
 {
   const kv = fakeKV()
   const store = kvStore({ BOARDS: kv })
-  await store.set('i:x', '{"v":1}')
-  await store.set('t:x:a', 'tail')
-  ok((await store.get('i:x')) === '{"v":1}', 'get reads KV')
-  const { blobs } = await store.list({ prefix: 't:x:' })
-  ok(blobs.length === 1 && blobs[0].key === 't:x:a',
+  await store.set('s:x', '{"seq":1}')
+  ok((await store.get('s:x')) === '{"seq":1}', 'get reads KV')
+  const { blobs } = await store.list({ prefix: 's:' })
+  ok(blobs.length === 1 && blobs[0].key === 's:x',
     'KV list keys (name) become board-core blobs (key) — the mapping the GC depends on')
-  await store.delete('i:x')
-  ok((await store.get('i:x')) === null, 'delete removes from KV')
+  await store.delete('s:x')
+  ok((await store.get('s:x')) === null, 'delete removes from KV')
 }
 
 // --- routing and the relay through the worker ---------------------------------
@@ -53,30 +53,35 @@ const json = (method, body, extra = {}) => new Request('https://x.example/board'
   const miss = await worker.fetch(new Request('https://x.example/board.css'), env)
   ok(miss.status === 404, 'a path that is not /board is refused by the worker — assets serve it, not the relay')
 
-  const index = {
-    v: 1, at: 1000, writes: false,
-    columns: [{ id: 'backlog', name: 'Backlog' }],
-    sessions: { abc: { key: 'abc', title: 'Fix it', phase: 'backlog', tags: [], archived: false, updated: 1000, tv: 1 } },
-  }
-  const pushed = await worker.fetch(json('POST', { kind: 'update', index, tails: [] }), env)
-  ok(pushed.status === 200 && (await pushed.json()).ok === true, 'an update goes through the worker')
+  const pushed = await worker.fetch(json('POST', {
+    kind: 'frame', at: 1000, writes: false, mv: 'v1',
+    state: { ready: true, mode: 'kanban' },
+    models: [{ id: 'claude-opus-5', label: 'Opus 5' }],
+  }), env)
+  ok(pushed.status === 200 && (await pushed.json()).ok === true, 'a frame goes through the worker')
 
-  const queued = await worker.fetch(json('POST', { kind: 'command', nonce: 'n1', text: 'go', session: 'abc' }), env)
-  ok(queued.status === 200, 'a command is queued through the worker')
+  const got = await worker.fetch(new Request('https://x.example/board?id=' + ID), env)
+  const g = await got.json()
+  ok(g.ok === true && g.frame && g.frame.state.ready === true, 'the frame reads back')
 
-  const got = await worker.fetch(new Request('https://x.example/board?id=' + ID + '&cmds=1'), env)
-  const { cmds } = await got.json()
-  ok(Array.isArray(cmds) && cmds.length === 1 && cmds[0].nonce === 'n1', 'the queue reads back')
+  const models = await worker.fetch(new Request('https://x.example/board?id=' + ID + '&models=1'), env)
+  const m = await models.json()
+  ok(m.models && m.models[0].label === 'Opus 5', 'the worker passes models=1 through to the relay')
 
-  const acked = await worker.fetch(json('POST', { kind: 'ack', nonces: ['n1'] }), env)
-  ok(acked.status === 200, 'the ack is accepted')
-  const empty = await worker.fetch(new Request('https://x.example/board?id=' + ID + '&cmds=1'), env)
-  ok((await empty.json()).cmds.length === 0, '…and the queue is empty after it')
+  const queued = await worker.fetch(json('POST', { kind: 'msg', nonce: 'n1', msg: { type: 'select', id: 'abc' } }), env)
+  ok(queued.status === 200, 'a message is queued through the worker')
+  const msgs = await worker.fetch(new Request('https://x.example/board?id=' + ID + '&msgs=1'), env)
+  ok((await msgs.json()).msgs.length === 1, 'the worker passes msgs=1 through to the relay')
+
+  // wait is accepted and ignored here — the answer must not claim longPoll.
+  const waited = await worker.fetch(new Request('https://x.example/board?id=' + ID + '&since=1&wait=25'), env)
+  const w = await waited.json()
+  ok(waited.status === 200 && w.longPoll === undefined, 'the worker ignores wait and never claims longPoll')
 
   const noKey = await worker.fetch(new Request('https://x.example/board?id=' + ID, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ kind: 'update', index, tails: [] }),
+    body: JSON.stringify({ kind: 'frame', at: 2000, writes: false, mv: '', state: { ready: true } }),
   }), env)
   ok(noKey.status === 401, 'the write gate holds in the worker too')
 }

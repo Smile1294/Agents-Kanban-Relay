@@ -15,10 +15,17 @@
  *
  * All behaviour lives in functions/board-core.mjs; this file is a store and a
  * transport, nothing more. Same rules as the other hosts: no stored secret,
- * the board address is the id derived from the pairing code, and commands are
+ * the board address is the id derived from the pairing code, and messages are
  * only QUEUED here — whether they run is the extension's decision.
+ *
+ * This host is the one that honours contract v2's `wait`: it holds a board GET
+ * open until the board's `seq` advances or the timeout, woken by an in-process
+ * emitter fired on every store mutation, and every GET answer carries
+ * `longPoll: true` so the page knows it may loop straight back. That is why
+ * the README recommends it for a live board.
  */
 import { createServer } from 'node:http'
+import { EventEmitter } from 'node:events'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,21 +37,32 @@ const ROOT = dirname(fileURLToPath(import.meta.url))
 // unset and every test run collided with a real relay on 8787.
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8787
 const STORE_FILE = join(process.env.RC_DATA || join(ROOT, 'data'), 'store.json')
-/** A push is bounded by the extension (chunks of ~150KB, commands of 20k
- *  chars); anything much bigger than a chunk of chunks is not a board update. */
-const BODY_MAX = 1024 * 1024
+/** A push is bounded by the extension and the page (contract v2: one message
+ *  may carry images, so 4 MB is legitimate); anything past 5 MB is not a board
+ *  update. */
+const BODY_MAX = 5 * 1024 * 1024
 
 /** The exact files this server will hand out. A whitelist, so no path in a
  *  URL can walk the filesystem. */
 const STATIC = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/index.html': ['index.html', 'text/html; charset=utf-8'],
-  '/board.css': ['board.css', 'text/css; charset=utf-8'],
-  '/board.js': ['board.js', 'text/javascript; charset=utf-8'],
+  '/bridge.css': ['bridge.css', 'text/css; charset=utf-8'],
+  '/bridge.js': ['bridge.js', 'text/javascript; charset=utf-8'],
+  '/media/board.css': ['media/board.css', 'text/css; charset=utf-8'],
+  '/media/board.js': ['media/board.js', 'text/javascript; charset=utf-8'],
+  '/media/theme.css': ['media/theme.css', 'text/css; charset=utf-8'],
 }
 
-/** The file-backed store. One JSON object for the whole relay — the index
- *  blob, the tails, the command queue — rewritten on every mutation. */
+/** The in-process signal long-polls wait on. Fired on every store mutation;
+ *  a waiter re-reads the board and either answers (seq advanced) or goes back
+ *  to sleep until its timeout. */
+const mutations = new EventEmitter()
+mutations.setMaxListeners(0)
+
+/** The file-backed store. One JSON object for the whole relay — the clock,
+ *  the frame, the model catalogue, the event ring and the message queue,
+ *  keyed by board id — rewritten on every mutation. */
 class FileStore {
   constructor(file) {
     this.file = file
@@ -86,6 +104,7 @@ class FileStore {
   async set(key, text) {
     this.data[key] = text
     await this.#save()
+    mutations.emit('change')
   }
 
   async get(key) {
@@ -96,6 +115,7 @@ class FileStore {
     if (Object.prototype.hasOwnProperty.call(this.data, key)) {
       delete this.data[key]
       await this.#save()
+      mutations.emit('change')
     }
   }
 
@@ -142,6 +162,51 @@ const send = (res, status, text, type = 'application/json') => {
 const store = new FileStore(STORE_FILE)
 await store.load()
 
+/** Build the board-core request from an HTTP request. */
+function relayReq(req, url, key) {
+  const q = url.searchParams
+  const since = q.get('since')
+  const wait = q.get('wait')
+  return {
+    method: req.method,
+    boardId: key || q.get('id') || '',
+    key,
+    since: since === null ? undefined : Number(since),
+    wait: wait === null ? undefined : Number(wait),
+    models: q.get('models') !== null,
+    msgs: q.get('msgs') !== null,
+  }
+}
+
+/** A board GET answer from this host always says `longPoll: true`. */
+function withLongPoll(out) {
+  return { status: out.status, json: { ...out.json, longPoll: true } }
+}
+
+/** Wake on the next store mutation, or the timeout, whichever is first. */
+function waitForChange(ms) {
+  return new Promise((resolve) => {
+    const on = () => { mutations.off('change', on); clearTimeout(t); resolve() }
+    const t = setTimeout(() => { mutations.off('change', on); resolve() }, ms)
+    mutations.once('change', on)
+  })
+}
+
+/** Hold a board GET open until `since` advances or the timeout — the one thing
+ *  this host does that the others cannot. A first load (no `since`) answers
+ *  right away; a 404 waits for the first push. */
+async function longPoll(req, since, waitSecs) {
+  const deadline = Date.now() + waitSecs * 1000
+  let out = await handle(req, store)
+  if (since === undefined || (out.status === 200 && out.json.seq > since)) return out
+  while (Date.now() < deadline) {
+    await waitForChange(deadline - Date.now())
+    out = await handle(req, store)
+    if (out.status === 200 && out.json.seq > since) return out
+  }
+  return out
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost')
   try {
@@ -156,14 +221,23 @@ const server = createServer(async (req, res) => {
           return
         }
       }
-      const out = await handle({
-        method: req.method,
-        boardId: key || url.searchParams.get('id') || '',
-        key,
-        tailKey: url.searchParams.get('tail') || undefined,
-        cmds: url.searchParams.get('cmds') !== null,
-        body,
-      }, store)
+
+      if (req.method === 'GET') {
+        const rreq = relayReq(req, url, key)
+        const waitSecs = Number.isInteger(rreq.wait) && rreq.wait >= 1 && rreq.wait <= 25 ? rreq.wait : undefined
+        const isPlainPoll = !rreq.models && !rreq.msgs
+
+        let out
+        if (waitSecs !== undefined && isPlainPoll) {
+          out = await longPoll(rreq, rreq.since, waitSecs)
+        } else {
+          out = await handle(rreq, store)
+        }
+        send(res, out.status, JSON.stringify(withLongPoll(out).json))
+        return
+      }
+
+      const out = await handle({ ...relayReq(req, url, key), body }, store)
       send(res, out.status, JSON.stringify(out.json))
       return
     }

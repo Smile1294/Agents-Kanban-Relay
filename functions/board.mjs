@@ -8,6 +8,10 @@
  * Reads are by board id (?id=<24 hex>) — the id is the capability and the page
  * derives it from the pairing code, so no session, cookie or login exists to
  * expire. Writes come from the extension with the same id in `x-rc-key`.
+ *
+ * Netlify cannot hold a request open, so `wait` is accepted and ignored here
+ * (contract v2: `wait` is honoured only by the plain Node host). The answer
+ * never carries `longPoll`, so the page falls back to timed polling.
  */
 import { getStore } from '@netlify/blobs'
 import { handle } from './board-core.mjs'
@@ -21,18 +25,24 @@ export default async (req) => {
   const store = getStore({ name: 'boards' })
   const url = new URL(req.url)
   const key = req.headers.get('x-rc-key') ?? ''
+  const q = url.searchParams
 
   let body
   if (req.method === 'POST') {
     try { body = await req.json() } catch { body = undefined }
   }
 
+  const since = q.get('since')
+  const wait = q.get('wait')
+
   const out = await handle({
     method: req.method,
-    boardId: key || url.searchParams.get('id') || '',
+    boardId: key || q.get('id') || '',
     key,
-    tailKey: url.searchParams.get('tail') || undefined,
-    cmds: url.searchParams.get('cmds') !== null,
+    since: since === null ? undefined : Number(since),
+    wait: wait === null ? undefined : Number(wait),
+    models: q.get('models') !== null,
+    msgs: q.get('msgs') !== null,
     body,
   }, store)
   return json(out.status, out.json)

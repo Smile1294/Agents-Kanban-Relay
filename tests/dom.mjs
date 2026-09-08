@@ -1,16 +1,25 @@
-/** A DOM small enough to run public/board.js in, and nothing more.
+/** A DOM small enough to run public/media/board.js in, and nothing more.
  *
- * A TRIMMED COPY of the extension repo's `test/dom.mjs` — the extension's
- * own webviews run against the same model of a browser, and the two files are
- * kept in step by hand (when the extension's copy grows, mirror the change
- * here). Only the pieces the viewer page needs are carried: makeNode,
- * matchesSelector, walk, findByTag. Keep the semantics identical — the viewer
- * test exists to catch a runtime throw that would otherwise be a blank page.
+ * A FULL COPY of the extension repo's `test/dom.mjs`, kept in step by hand:
+ * when the extension's copy grows, mirror the change here. The only adaptions
+ * are the header below and the harness import — this repo has no
+ * `tests/harness.mjs`, so `repoRoot` is derived locally, and the board source
+ * lives at `public/media/board.js` (the synced copy) rather than `media/`.
  *
- * The viewer page is the one layer with no type checking, so a runtime throw
- * there is invisible in production: the watcher just sees nothing. Running the
- * real board.js against this stub turns that into a test failure.
+ * The webview is the one layer with no type checking, so a runtime throw there
+ * is invisible: the panel simply stays blank. Running the real board.js against
+ * this stub turns that into a test failure.
+ *
+ * Shared by the view unit test (hand-written states) and the smoke test (the
+ * REAL state the host produces) — which is the pairing that matters. Either
+ * alone can pass while the two sides disagree about the state's shape.
  */
+import { promises as fs } from 'node:fs'
+import * as path from 'node:path'
+import vm from 'node:vm'
+import { fileURLToPath } from 'node:url'
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 export function makeNode(tag) {
   const node = {
@@ -160,4 +169,158 @@ export function walk(node, out = []) {
  *  whether it is on screen. */
 export function findByTag(root, tag, match) {
   return walk(root).find((n) => n.tagName === tag && (!match || match(n)))
+}
+
+let cachedSrc
+
+/**
+ * Pixel dimensions the stub `Image` reports for a given data URL.
+ *
+ * A browser gets these by decoding the bytes; there are no bytes here, so a
+ * test that wants a 3000px-wide screenshot declares one with `fakeImageFile`.
+ */
+export const IMAGE_SIZES = new Map()
+
+/** A stand-in for a `File` off the clipboard or a drop, with known dimensions. */
+export function fakeImageFile(name, type, { width = 800, height = 600, data = 'ORIGINAL' } = {}) {
+  const dataUrl = `data:${type};base64,${data}`
+  IMAGE_SIZES.set(dataUrl, { width, height })
+  return { name, type, _dataUrl: dataUrl }
+}
+
+export async function boardSource() {
+  cachedSrc ??= await fs.readFile(path.join(repoRoot, 'public', 'media', 'board.js'), 'utf8')
+  return cachedSrc
+}
+
+let cachedSettings
+export async function settingsSource() {
+  cachedSettings ??= await fs.readFile(path.join(repoRoot, 'media', 'settings.js'), 'utf8')
+  return cachedSettings
+}
+
+/**
+ * The settings page, run in the same stub DOM.
+ *
+ * Shares `renderBoardWith`'s context builder deliberately: the settings page is
+ * another untyped webview script, and giving it a second harness is how a DOM
+ * API one of them starts using gets added in one place and missed in the other.
+ * The one difference is the message envelope — the settings page listens for
+ * `{type:'state', state, error}` rather than the board's `{type:'state'}`.
+ *
+ * (Not used by the relay repo, which carries no settings page; kept because
+ * this file is a faithful copy.)
+ */
+export async function renderSettings(state, { error } = {}) {
+  const src = await settingsSource()
+  const view = renderBoardWith(src, undefined)
+  if (state || error) {
+    for (const fn of view.listeners) fn({ data: { type: 'state', state, error } })
+  }
+  return view
+}
+
+/**
+ * Run board.js, optionally deliver one state message, and return what it drew.
+ * Throws exactly where the real webview would silently blank.
+ *
+ * Async only because it loads the source; `renderBoardWith` is the same thing
+ * once you already have it, so a suite of straight-line assertions does not
+ * have to become a suite of awaits.
+ */
+export async function renderBoard(state, opts = {}) {
+  return renderBoardWith(await boardSource(), state, opts)
+}
+
+export function renderBoardWith(src, state, { layout = 'compact' } = {}) {
+  const root = makeNode('div')
+  const posted = []
+  const listeners = []
+  /** Timers board.js registered, held rather than run — see `setInterval`. */
+  const timers = []
+  const document = {
+    activeElement: null,
+    // Real lookup by id: the settings page's table of contents anchors sections
+    // with `document.getElementById`, and a stub that answered only for 'root'
+    // made every nav link a no-op that no test could see.
+    getElementById: (id) => {
+      if (id === 'root') return root
+      return walk(root).find((n) => n.id === id) ?? null
+    },
+    createElement: (tag) => {
+      const n = makeNode(tag)
+      n._doc = document
+      // A canvas is a real capability board.js uses to downscale a pasted
+      // screenshot before sending it. Stubbed rather than omitted, because the
+      // alternative is that the whole paste path is untestable — and a throw
+      // in there is a silently blank panel.
+      if (tag === 'canvas') {
+        n.getContext = () => ({ drawImage() { n._drawn = true } })
+        n.toDataURL = (type) => `data:${type || 'image/png'};base64,SCALED`
+      }
+      return n
+    },
+    createTextNode: (t) => ({ textContent: t, children: [], className: '' }),
+    documentElement: { dataset: { layout } },
+    body: makeNode('body'),
+    /* `querySelectorAll` on the DOCUMENT, not only on elements.
+       `tickAges()` — the function that makes the liveness age climb, which is
+       the board's only honest "is it still moving" signal — finds its nodes
+       with `document.querySelectorAll('[data-since]')`. The stub had the method
+       on `makeNode` and not here, so the function could not run in any gate:
+       the ticker was untestable and a break in it would have been invisible. */
+    querySelectorAll: (sel) => root.querySelectorAll(sel),
+    querySelector: (sel) => root.querySelector(sel),
+    addEventListener() {}, removeEventListener() {},
+  }
+  const ctx = {
+    document,
+    window: { addEventListener: (t, fn) => { if (t === 'message') listeners.push(fn) } },
+    acquireVsCodeApi: () => ({ postMessage: (m) => posted.push(m) }),
+    Date, Math, Number, JSON, console, Set, Array, Object, String, Map, Intl, Buffer, prompt: () => null,
+    /* A CONTROLLABLE timer. `setInterval` is not a V8 intrinsic, so it is
+       simply absent from a `vm` context — board.js guards on
+       `typeof setInterval === 'function'`, so the ticker was never even
+       registered. Collecting the callback instead of running it lets a test
+       drive the clock deliberately, which is the only way to assert that an age
+       climbs. */
+    setInterval: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+    clearInterval: () => {},
+    setTimeout: (fn) => { void fn; return 0 },
+    clearTimeout: () => {},
+    /**
+     * Just enough of the browser's image plumbing to run the attachment path.
+     *
+     * Both call their handlers SYNCHRONOUSLY. In a browser they are async, and
+     * the difference matters for one thing only — board.js calls render() from
+     * inside `onload`, so a test can assert on the result without waiting. Any
+     * ordering the code depends on beyond that would be a bug in the code.
+     */
+    FileReader: class {
+      readAsDataURL(file) {
+        this.result = file && file._dataUrl
+        if (this.result === undefined) { this.onerror?.(); return }
+        this.onload?.()
+      }
+    },
+    Image: class {
+      set src(v) {
+        const meta = IMAGE_SIZES.get(v)
+        if (!meta) { this.onerror?.(); return }
+        this.width = meta.width
+        this.height = meta.height
+        this.onload?.()
+      }
+    },
+  }
+  vm.createContext(ctx)
+  vm.runInContext(src, ctx, { filename: 'board.js' })
+  // A second state message is how the host talks to a board that is already on
+  // screen — every agent frame is one. What survives that repaint (scroll
+  // position, focus) is only testable by sending one.
+  const deliver = (st) => { for (const fn of listeners) fn({ data: { type: 'state', state: st } }) }
+  if (state) deliver(state)
+  /** Run every registered interval callback once, as a second passing. */
+  const tick = () => { for (const t of timers) t.fn() }
+  return { root, posted, document, deliver, listeners, timers, tick, text: () => root.textContent }
 }
