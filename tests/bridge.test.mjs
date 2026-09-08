@@ -266,6 +266,82 @@ const postedMsg = (fetched, type) => fetched.filter((f) =>
     'answering the dialog posts { type:"remote.dialog", id, answer }')
 }
 
+// --- a refused action SAYS so, and is retried once ----------------------------
+//
+// The failure this pins: `sendEnvelope` threw its answer away — a bare
+// `catch {}` on the network and no look at the status at all — so a message
+// the relay refused was indistinguishable from one that ran. The board's rule
+// is that an answer the user can miss, to an action they deliberately took, is
+// the same class of bug as a signal that cannot say "bad". And a 500 here is
+// not hypothetical: the Node host's store races answered exactly that under
+// load, on the `msg` post — a button pressed on the phone that did nothing.
+
+/** Run the timers the bridge armed, once, so a retry that waits can happen. */
+const runTimers = async (h) => {
+  const due = h.timers.splice(0)
+  for (const t of due) t.fn()
+  await settle()
+  await settle()
+}
+
+{
+  let attempts = 0
+  const router = (url, init, rec) => {
+    if (url.includes('models=1')) return resp(200, { ok: true, mv: 'v1', models: MODELS })
+    // board.js posts `ready` on boot; only the click under test is counted.
+    if (rec.method === 'POST' && rec.body.kind === 'msg' && rec.body.msg.type === 'select') {
+      attempts++
+      return attempts === 1 ? resp(500, { ok: false, error: 'the relay failed' }) : resp(200, { ok: true })
+    }
+    return resp(200, { ok: true, seq: 1, at: Date.now(), writes: true, mv: 'v1', frame: chatFrame(), events: [] })
+  }
+  const h = await boot({ id: ID, router })
+  h.win.acquireVsCodeApi().postMessage({ type: 'select', id: 'x' })
+  await settle()
+  ok(attempts === 1, 'the action is posted once')
+  await runTimers(h)
+  ok(attempts === 2, 'a 5xx is retried — the nonce makes the retry idempotent at the relay')
+  ok(!hasToast(h.body, 'did not reach the board'),
+    '…and a retry that lands says nothing: the action ran')
+}
+
+{
+  const router = (url, init, rec) => {
+    if (url.includes('models=1')) return resp(200, { ok: true, mv: 'v1', models: MODELS })
+    if (rec.method === 'POST' && rec.body.kind === 'msg' && rec.body.msg.type === 'select') {
+      return resp(500, { ok: false, error: 'the relay failed' })
+    }
+    return resp(200, { ok: true, seq: 1, at: Date.now(), writes: true, mv: 'v1', frame: chatFrame(), events: [] })
+  }
+  const h = await boot({ id: ID, router })
+  h.win.acquireVsCodeApi().postMessage({ type: 'select', id: 'x' })
+  await settle()
+  await runTimers(h)
+  ok(hasToast(h.body, 'did not reach the board'),
+    'an action that never lands SAYS so rather than looking like it worked')
+}
+
+{
+  const router = (url, init, rec) => {
+    if (url.includes('models=1')) return resp(200, { ok: true, mv: 'v1', models: MODELS })
+    if (rec.method === 'POST' && rec.body.kind === 'msg' && rec.body.msg.type === 'select') {
+      return resp(429, { ok: false, error: 'the message queue is full — wait for the board to catch up' })
+    }
+    return resp(200, { ok: true, seq: 1, at: Date.now(), writes: true, mv: 'v1', frame: chatFrame(), events: [] })
+  }
+  const h = await boot({ id: ID, router })
+  const before = postedMsg(h.fetched, 'select').length
+  h.win.acquireVsCodeApi().postMessage({ type: 'select', id: 'x' })
+  await settle()
+  // Asserted BEFORE the timers run: a toast arms its own removal timer, and
+  // running every armed timer would take the toast away with it.
+  ok(hasToast(h.body, 'has not picked up your last actions'),
+    'a full queue names the real cause — the board is not draining it')
+  await runTimers(h)
+  ok(postedMsg(h.fetched, 'select').length === before + 1,
+    '…and a 4xx is NOT retried: sending it again cannot change the answer')
+}
+
 // --- an oversize message is refused with a toast, never posted -----------------
 
 {

@@ -210,7 +210,10 @@ READ-ONLY badge and the dropped-post toast.
   mapping, the routing guard, and the new query params.
 - `tests/server.test.mjs` — the real Node server, spawned on an ephemeral port
   with a throwaway data directory, driven over real HTTP: the static routes,
-  the 5 MB body bound, and true long-poll.
+  the 5 MB body bound, true long-poll, and concurrency — that no simultaneous
+  write answers 5xx, that the queue holds exactly its cap rather than whichever
+  writes won, and that N concurrent events advance `seq` by exactly N, on one
+  board and across several sharing the store file.
 - `tests/contract.test.mjs` — this copy of `remote-contract.json` agrees with
   `board-core.mjs`'s constants and with the `/board` route the hosts serve.
 - `tests/media-sync.test.mjs` — the three `public/media/` assets are
@@ -218,8 +221,10 @@ READ-ONLY badge and the dropped-post toast.
   extension checkout is next to this one.
 - `tests/bridge.test.mjs` — `public/bridge.js` then the real
   `public/media/board.js` in one shared DOM: the gate, frame dispatch, the
-  composer chips, the message queue, the READ-ONLY badge, remote dialogs and
-  the oversize guard.
+  composer chips, the message queue, the READ-ONLY badge, remote dialogs, the
+  oversize guard, and that an action the relay refuses SAYS so — retried once on
+  a 5xx or a dropped connection (the nonce makes that idempotent), never on a
+  4xx, and a full queue named as the board not draining it.
 
 `tests/dom.mjs` is a full copy of the extension repo's `test/dom.mjs` — the
 stub DOM the extension's own webviews run against. When the extension's copy

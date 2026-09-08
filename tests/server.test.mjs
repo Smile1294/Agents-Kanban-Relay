@@ -164,6 +164,85 @@ const s1 = await startServer(tmp)
   ok(json.longPoll === true && json.seq === 3, '…and it sees the new frame')
 }
 
+// --- concurrency: no write is lost, and none answers 500 ----------------------
+//
+// Every branch of board-core is a read-modify-write across `await` points, and
+// this host serves requests concurrently. Two bugs lived in that gap and both
+// were measured before they were fixed: overlapping saves raced on ONE
+// `store.json.tmp` (the first rename moved it out from under the second, which
+// threw ENOENT and answered 500 — 37 of 200 posts), and interleaved
+// read-modify-writes lost queue entries and collided the clock's `seq` (200
+// posts, 3 answered 200, 40 in the queue). A 500 on a `msg` post is a button
+// somebody pressed on the remote page that silently did nothing; a colliding
+// `seq` files a frame under a number a watching page has already passed, and
+// that page never sees it.
+
+{
+  const BOARD = 'b'.repeat(24)
+  await fetch(s1.base + '/board', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-rc-key': BOARD },
+    body: JSON.stringify({ kind: 'frame', at: Date.now(), writes: true, mv: 'v1', state: STATE }),
+  })
+
+  const N = 120
+  const statuses = await Promise.all(Array.from({ length: N }, (_, i) =>
+    fetch(s1.base + '/board', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-rc-key': BOARD },
+      body: JSON.stringify({ kind: 'msg', nonce: 'n' + i, msg: { type: 'select', id: 'x' + i } }),
+    }).then((r) => r.status)))
+
+  const accepted = statuses.filter((x) => x === 200).length
+  const refused = statuses.filter((x) => x === 429).length
+  const failed = statuses.filter((x) => x >= 500).length
+  ok(failed === 0, `no concurrent write answers 5xx (got ${failed} of ${N})`)
+
+  const queued = await (await fetch(s1.base + `/board?id=${BOARD}&msgs=1`)).json()
+  ok(queued.msgs.length === 40, 'the queue holds exactly its cap — msgMax, not "whichever writes won"')
+  ok(accepted === 40 && refused === N - 40,
+    `every accepted post is IN the queue: ${accepted} accepted, ${refused} refused with 429`)
+
+  // The clock is the number both ends agree on. Concurrent events must each
+  // get their own seq — a collision is a frame a watching page never sees.
+  const before = (await (await fetch(s1.base + `/board?id=${BOARD}`)).json()).seq
+  await Promise.all(Array.from({ length: 20 }, (_, i) =>
+    fetch(s1.base + '/board', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-rc-key': BOARD },
+      body: JSON.stringify({ kind: 'event', events: [{ type: 'searchResults', n: i }] }),
+    })))
+  const after = (await (await fetch(s1.base + `/board?id=${BOARD}`)).json()).seq
+  ok(after === before + 20,
+    `20 concurrent events advance seq by exactly 20 (${before} -> ${after})`)
+}
+
+{
+  // TWO boards at once. The per-board mutex deliberately does not serialise
+  // across boards — one board's slow write must not hold up another's poll —
+  // but every board shares ONE store.json, so the save itself is what has to
+  // be safe. This is the case that fails on a shared `store.json.tmp` while
+  // the single-board case above passes.
+  const boards = ['c'.repeat(24), 'd'.repeat(24), 'e'.repeat(24)]
+  const posts = []
+  for (let i = 0; i < 30; i++) {
+    for (const b of boards) {
+      posts.push(fetch(s1.base + '/board', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-rc-key': b },
+        body: JSON.stringify({ kind: 'event', events: [{ type: 'searchResults', n: i }] }),
+      }).then((r) => r.status))
+    }
+  }
+  const statuses = await Promise.all(posts)
+  const failed = statuses.filter((x) => x >= 500).length
+  ok(failed === 0, `concurrent writes across boards share one store file and none fails (${failed} of ${statuses.length})`)
+  for (const b of boards) {
+    const { seq } = await (await fetch(s1.base + `/board?id=${b}`)).json()
+    ok(seq === 30, `board ${b.slice(0, 1)} counted all 30 of its own events (seq ${seq})`)
+  }
+}
+
 // --- persistence across a restart --------------------------------------------
 
 await stop(s1.child)

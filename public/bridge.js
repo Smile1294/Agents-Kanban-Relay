@@ -80,22 +80,71 @@
     return true
   }
 
-  /** POST one envelope and fold its answer's `writes` back in. */
-  async function sendEnvelope(body) {
+  /**
+   * POST one envelope, and SAY so when it does not land.
+   *
+   * The answer used to be thrown away entirely: a `catch {}` on the network
+   * and no look at the status at all. So a message the relay refused — a 500
+   * from a store write that lost a race, a 429 from a queue the board has not
+   * drained — was indistinguishable from one that ran. That is a button the
+   * user pressed and watched do nothing, which is the failure this project
+   * has a rule about; the page cannot draw a modal over an action the board
+   * has not seen, but it can refuse to pretend.
+   *
+   * Retried ONCE on the two failures that are worth retrying — the network,
+   * and a 5xx — because the nonce makes a retry idempotent: the relay answers
+   * a nonce it already holds with `ok:true` rather than queueing it twice.
+   * A 4xx is not retried: the relay is telling us the message itself is the
+   * problem, and sending it again cannot change that.
+   */
+  async function sendEnvelope(body, attempt = 0) {
+    let res
     try {
-      const res = await fetch('/board', {
+      res = await fetch('/board', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-rc-key': id },
         body: JSON.stringify(body),
       })
-      const json = await res.json().catch(() => null)
-      if (json && typeof json.writes === 'boolean') {
-        writes = json.writes
-        renderStatus()
-      }
     } catch {
-      /* network — the poll loop surfaces it */
+      if (attempt === 0) return retrySend(body)
+      toast({ level: 'error', text: 'That did not reach the board — the relay did not answer' })
+      return
     }
+
+    if (res.status >= 500) {
+      if (attempt === 0) return retrySend(body)
+      toast({ level: 'error', text: 'That did not reach the board — the relay answered ' + res.status })
+      return
+    }
+    if (res.status === 429) {
+      // The queue is full: the board has not picked up what is already there.
+      // Naming that is the difference between "nothing happened" and "the
+      // machine at the other end is not listening".
+      toast({ level: 'warning', text: 'The board has not picked up your last actions — nothing new can be queued until it does' })
+      return
+    }
+    if (!res.ok) {
+      toast({ level: 'error', text: 'The board refused that (' + res.status + ')' })
+      return
+    }
+
+    const json = await res.json().catch(() => null)
+    if (json && json.ok === false) {
+      toast({ level: 'error', text: json.error ? String(json.error) : 'The board refused that' })
+      return
+    }
+    if (json && typeof json.writes === 'boolean') {
+      writes = json.writes
+      renderStatus()
+    }
+  }
+
+  /** One retry, a moment later. Awaited by the caller, so a caller that cares
+   *  (dictation) still knows when the send is over. */
+  function retrySend(body) {
+    return new Promise((resolve) => {
+      setTimeout(() => { sendEnvelope(body, 1).then(resolve, resolve) }, 800)
+    })
   }
 
   window.acquireVsCodeApi = () => ({

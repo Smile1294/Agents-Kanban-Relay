@@ -90,9 +90,20 @@ never the relay's. The relay only holds them.
 
 | Host | Store | `wait` / `longPoll` |
 |---|---|---|
-| `server.js` (Node) | one JSON file, atomic writes | honours `wait`; every GET carries `longPoll:true` |
+| `server.js` (Node) | one JSON file, serialised atomic writes | honours `wait`; every GET carries `longPoll:true` |
 | `functions/board.mjs` (Netlify) | Netlify Blobs (`getStore`, site-wide) | ignores `wait`; no `longPoll` |
 | `worker.js` (Cloudflare) | Workers KV | ignores `wait`; no `longPoll` |
+
+**Concurrency.** Every branch above is a read-modify-write across `await`
+points — read the clock, bump `seq`, write it back — so `handle()` serialises
+per BOARD id (`functions/board-core.mjs`). Interleaved requests otherwise lose
+queue entries and collide `seq`, and a colliding `seq` files a frame under a
+number a watching page has already passed: that page never sees the frame. The
+mutex is in-process, so it is a real guarantee on the Node host (the recommended
+one, and the only one that long-polls) and best-effort on Netlify and the
+Worker, which run many instances. Per board rather than global so one board's
+write cannot hold up another's poll. Measured before it existed: 200 concurrent
+posts to one board, 3 answered `200`, 40 in the queue.
 
 `server.js` bounds the request body at `BODY_MAX` (5 MB — a message may carry
 images) and serves a static whitelist that includes `/media/board.js`,

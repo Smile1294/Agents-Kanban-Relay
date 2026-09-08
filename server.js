@@ -11,7 +11,13 @@
  * - The store is data/store.json, written atomically (temp file + rename), so
  *   a crash mid-write cannot leave a half-written blob that wedges the relay
  *   (board-core reads a broken queue as empty, but a broken store file would
- *   take the whole board with it — hence the rename).
+ *   take the whole board with it — hence the rename). Saves are SERIALISED and
+ *   the temp file is per save: two concurrent saves wrote the same
+ *   `store.json.tmp` and the first rename moved it out from under the second,
+ *   so the second threw ENOENT and the request answered 500. Measured with 200
+ *   concurrent posts to one board: 37 of them failed that way — and a 500 on a
+ *   `msg` post is a button the user pressed on the remote page that silently
+ *   did nothing.
  *
  * All behaviour lives in functions/board-core.mjs; this file is a store and a
  * transport, nothing more. Same rules as the other hosts: no stored secret,
@@ -26,7 +32,8 @@
  */
 import { createServer } from 'node:http'
 import { EventEmitter } from 'node:events'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { handle } from './functions/board-core.mjs'
@@ -67,6 +74,10 @@ class FileStore {
   constructor(file) {
     this.file = file
     this.data = {}
+    /** The tail of the save chain. Writes are serialised because they all
+     *  rewrite the SAME file from the same in-memory object: two overlapping
+     *  saves is one rename racing another, and a lost update besides. */
+    this.saving = Promise.resolve()
   }
 
   async load() {
@@ -94,11 +105,32 @@ class FileStore {
     console.error(`[remote] store.json was unreadable — moved it to ${aside} and started empty`)
   }
 
-  async #save() {
+  /** Serialise the save, and give each one its own temp file.
+   *
+   *  Both halves are load-bearing and neither is enough alone. A shared
+   *  `store.json.tmp` is what made concurrent saves throw ENOENT — the first
+   *  rename takes the file the second is about to rename — and serialising
+   *  without a unique name would still leave a crashed process's temp file
+   *  lying where the next save wants to write. The chain never breaks on a
+   *  rejection: one failed save must not wedge every write after it. */
+  #save() {
+    const next = this.saving.then(() => this.#write(), () => this.#write())
+    this.saving = next.catch(() => {})
+    return next
+  }
+
+  async #write() {
     await mkdir(dirname(this.file), { recursive: true })
-    const tmp = `${this.file}.tmp`
-    await writeFile(tmp, JSON.stringify(this.data))
-    await rename(tmp, this.file)
+    const tmp = `${this.file}.${randomUUID()}.tmp`
+    try {
+      await writeFile(tmp, JSON.stringify(this.data))
+      await rename(tmp, this.file)
+    } catch (e) {
+      // A failed rename leaves the temp file behind; the store directory is
+      // ours, so clean up rather than accumulating one per failure.
+      await rm(tmp, { force: true }).catch(() => {})
+      throw e
+    }
   }
 
   async set(key, text) {

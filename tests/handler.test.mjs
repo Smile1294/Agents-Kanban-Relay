@@ -260,6 +260,91 @@ const postMsg = (store, nonce, msg, extra = {}) => post(store, {
   ok(JSON.parse(store.map.get(`q:${ID}`)).length === 1, 'delivery does not remove — only an ack does')
 }
 
+// --- concurrent requests are serialised per board ----------------------------
+//
+// Every branch of `handle` is a read-modify-write across `await` points, so a
+// host that serves requests concurrently interleaves them: two requests read
+// the same `seq`, both write `seq + 1`, and one increment is gone. The clock is
+// the one number both ends agree on — a frame filed under a seq a watching page
+// has already passed is a frame that page never sees.
+
+{
+  const store = fakeStore()
+  // A store whose writes actually take time, and which counts overlaps: an
+  // instantaneous fake would pass with or without the mutex.
+  let inFlight = 0
+  let maxOverlap = 0
+  const slow = {
+    ...store,
+    async set(k, v) {
+      inFlight++
+      maxOverlap = Math.max(maxOverlap, inFlight)
+      await new Promise((r) => setTimeout(r, 1))
+      inFlight--
+      return store.set(k, v)
+    },
+  }
+  await post(slow)
+  await Promise.all(Array.from({ length: 50 }, (_, i) => handle({
+    method: 'POST', boardId: ID, key: ID,
+    body: { kind: 'event', events: [{ type: 'searchResults', n: i }] },
+  }, slow)))
+  const clock = JSON.parse(store.map.get(`s:${ID}`))
+  ok(clock.seq === 51, `50 concurrent events after one frame leave seq at 51 (got ${clock.seq})`)
+  ok(maxOverlap === 1, `one board's writes never overlap (max overlap ${maxOverlap})`)
+}
+
+{
+  const store = fakeStore()
+  await post(store)
+  const results = await Promise.all(Array.from({ length: 50 }, (_, i) => handle({
+    method: 'POST', boardId: ID, key: ID, body: { kind: 'msg', nonce: 'n' + i, msg: { type: 'select' } },
+  }, store)))
+  const accepted = results.filter((r) => r.status === 200).length
+  const queued = JSON.parse(store.map.get(`q:${ID}`)).length
+  ok(queued === accepted,
+    `every message answered 200 is IN the queue (${accepted} accepted, ${queued} queued)`)
+  ok(queued === MSG_MAX, 'and the cap is the cap, not "whichever write won"')
+}
+
+{
+  // A store that throws must not wedge the board: the chain runs the next
+  // request whether the previous one resolved or threw.
+  const store = fakeStore()
+  await post(store)
+  let boom = true
+  const flaky = { ...store, async set(k, v) { if (boom) { boom = false; throw new Error('disk') } return store.set(k, v) } }
+  const threw = await handle({
+    method: 'POST', boardId: ID, key: ID, body: { kind: 'event', events: [{ type: 'x' }] },
+  }, flaky).then(() => null, (e) => e)
+  ok(threw instanceof Error, 'a store failure still surfaces to the host')
+  const after = await handle({
+    method: 'POST', boardId: ID, key: ID, body: { kind: 'event', events: [{ type: 'y' }] },
+  }, flaky)
+  ok(after.status === 200, '…and the board keeps serving: one failed write does not wedge the chain')
+}
+
+{
+  // Per BOARD, not global — one board's slow write must not hold another's poll.
+  const store = fakeStore()
+  const order = []
+  const slow = {
+    ...store,
+    async set(k, v) {
+      // Only the first board's writes are slow.
+      if (k.endsWith(ID)) await new Promise((r) => setTimeout(r, 20))
+      order.push(k)
+      return store.set(k, v)
+    },
+  }
+  const OTHER = 'c'.repeat(24)
+  const a = handle({ method: 'POST', boardId: ID, key: ID, body: frameBody() }, slow)
+  const b = handle({ method: 'POST', boardId: OTHER, key: OTHER, body: frameBody() }, slow)
+  await Promise.all([a, b])
+  ok(order[0].endsWith(OTHER),
+    'a fast board answers while a slow one is still writing — the lock is per board')
+}
+
 // --- the constants agree with the contract -----------------------------------
 
 {

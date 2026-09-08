@@ -55,6 +55,44 @@ export const EVENTS_MAX = 50
 /** The one API path every host serves (also the route each host routes). */
 export const FN_PATH = '/board'
 
+/**
+ * One board's requests, serialised.
+ *
+ * Every branch below is a read-modify-write across `await` points — read the
+ * clock, bump `seq`, write it back; read the queue, push, write it back — and a
+ * host that serves requests concurrently interleaves them. Measured on the Node
+ * host with 200 concurrent posts to one board: 40 messages reached the queue,
+ * 3 were answered `200`, and the clock's `seq` collided so a stored frame was
+ * filed under a number a watching page had already passed — which is a page
+ * that never sees that frame again. The relay is the one place both ends agree
+ * on what `seq` means, so a lost increment is not a slow board, it is a board
+ * that stops.
+ *
+ * Per BOARD, not global: two boards share nothing, and one board's slow write
+ * must not hold up another's poll. In-process only — Netlify and the Worker run
+ * many instances and this cannot promise anything across them — which is why it
+ * is a mutex and not the correctness argument: it makes the single-process host
+ * (the recommended one, and the only one that long-polls) actually correct, and
+ * costs the others nothing.
+ */
+const chains = new Map()
+
+function serialise(id, fn) {
+  const prev = chains.get(id) ?? Promise.resolve()
+  // The chain never breaks on a rejection, or one failed request wedges every
+  // later request for that board: `then(fn, fn)` runs the next request whether
+  // the previous one resolved or threw.
+  const next = prev.then(fn, fn)
+  // What the NEXT request chains off is `link`, not `next` — a settled link,
+  // never a rejected one. It is also what the map holds, so the identity check
+  // below is against the value actually stored: comparing against `next` would
+  // never match and the map would grow for the life of the process.
+  const link = next.then(() => {}, () => {})
+  chains.set(id, link)
+  void link.then(() => { if (chains.get(id) === link) chains.delete(id) })
+  return next
+}
+
 /** The storage blobs, keyed by board id. Small clock first — every GET reads
  *  it before anything else, so a cheap poll costs one read. */
 const clockBlob = (id) => `s:${id}`
@@ -137,7 +175,10 @@ function jsonBytes(body) {
 export async function handle(req, store) {
   const id = req.boardId || ''
   if (!ID_OK.test(id)) return fail(400, 'not a board address')
+  return serialise(id, () => route(req, id, store))
+}
 
+async function route(req, id, store) {
   if (req.method === 'POST') {
     // The write gate: the id IS the credential, and it travels in x-rc-key.
     // There is no stored secret to compare against — the gate is that the
