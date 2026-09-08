@@ -1,0 +1,101 @@
+/* The board's theme OUTSIDE the editor.
+ *
+ * Every colour in board.css and settings.css is `var(--vscode-*)`. Inside VS
+ * Code the editor sets each of those variables inline on `<html>` from the
+ * active theme, so the stylesheets never carry a hex value — and an inline
+ * style outranks anything declared here, which is what makes this file INERT in
+ * the editor. It is not loaded there at all (see `panel.ts`); it exists for the
+ * two places that render the same board with no editor around it:
+ *
+ *   - the headless board, `server/server.mjs`, served to a browser;
+ *   - the screenshot renderer, `test/screenshots.mjs`.
+ *
+ * Without it the browser painted `var()` after `var()` resolving to nothing:
+ * a white page with black text, default blue links and light scrollbars — the
+ * remote board looked like an unstyled document ("the remote is fully white").
+ * `theme.test.mjs` asserts every variable the stylesheets use is declared here,
+ * so a colour added to board.css cannot arrive in the browser unthemed.
+ *
+ * The palette is VS Code's Dark Modern, the default theme, so the browser shows
+ * the board as the editor does out of the box. Dark only, deliberately: the
+ * editor is where a user picks a theme, and this page follows the editor's
+ * default rather than the OS.
+ */
+:root {
+  color-scheme: dark;
+
+  --vscode-font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, Ubuntu, "Droid Sans", sans-serif;
+  --vscode-font-size: 13px;
+  --vscode-editor-font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --vscode-foreground: #cccccc;
+  --vscode-descriptionForeground: #9d9d9d;
+  --vscode-errorForeground: #f85149;
+  --vscode-focusBorder: #0078d4;
+
+  --vscode-editor-background: #1f1f1f;
+  --vscode-editorWidget-background: #202020;
+  --vscode-sideBar-background: #181818;
+  --vscode-panel-border: #2b2b2b;
+  --vscode-widget-border: #313131;
+
+  --vscode-textLink-foreground: #4daafc;
+  --vscode-textBlockQuote-background: #2b2b2b;
+  --vscode-textBlockQuote-border: #616161;
+  --vscode-textCodeBlock-background: #2b2b2b;
+
+  --vscode-button-background: #0078d4;
+  --vscode-button-foreground: #ffffff;
+  --vscode-button-hoverBackground: #026ec1;
+  --vscode-button-secondaryBackground: #313131;
+  --vscode-button-secondaryForeground: #cccccc;
+  --vscode-button-secondaryHoverBackground: #3c3c3c;
+
+  --vscode-input-background: #313131;
+  --vscode-input-foreground: #cccccc;
+  --vscode-input-border: #3c3c3c;
+  --vscode-inputValidation-errorBackground: #5a1d1d;
+  --vscode-inputValidation-errorBorder: #be1100;
+  --vscode-inputValidation-warningBackground: #352a05;
+  --vscode-inputValidation-warningBorder: #b89500;
+
+  --vscode-list-hoverBackground: #2a2d2e;
+  --vscode-list-activeSelectionBackground: #04395e;
+  --vscode-list-inactiveSelectionBackground: #37373d;
+
+  --vscode-menu-background: #1f1f1f;
+  --vscode-menu-foreground: #cccccc;
+  --vscode-menu-border: #454545;
+  --vscode-menu-selectionBackground: #0078d4;
+
+  --vscode-badge-background: #616161;
+  --vscode-badge-foreground: #f8f8f8;
+
+  --vscode-charts-green: #89d185;
+  --vscode-charts-blue: #3794ff;
+  --vscode-charts-yellow: #cca700;
+  --vscode-charts-red: #f14c4c;
+  --vscode-charts-purple: #b180d7;
+  --vscode-charts-orange: #d18616;
+  --vscode-testing-iconPassed: #73c991;
+  --vscode-testing-iconFailed: #f14c4c;
+  --vscode-editorWarning-foreground: #cca700;
+
+  --vscode-scrollbarSlider-background: rgba(121, 121, 121, 0.4);
+  --vscode-scrollbarSlider-hoverBackground: rgba(100, 100, 100, 0.7);
+  --vscode-scrollbarSlider-activeBackground: rgba(191, 191, 191, 0.4);
+}
+
+/* What the editor's webview preamble styles for free, and a browser does not:
+   thin dark scrollbars, themed links and code. A page with the right
+   background and the browser's default 15px light scrollbars still reads as
+   "not the editor". */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-corner { background-color: var(--vscode-editor-background); }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background-color: var(--vscode-scrollbarSlider-background); }
+::-webkit-scrollbar-thumb:hover { background-color: var(--vscode-scrollbarSlider-hoverBackground); }
+::-webkit-scrollbar-thumb:active { background-color: var(--vscode-scrollbarSlider-activeBackground); }
+html { background: var(--vscode-editor-background); }
+a { color: var(--vscode-textLink-foreground); }
+code { font-family: var(--vscode-editor-font-family); }

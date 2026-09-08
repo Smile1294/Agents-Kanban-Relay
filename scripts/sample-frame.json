@@ -1,0 +1,89 @@
+{
+  "type": "state",
+  "state": {
+    "ready": true,
+    "mode": "kanban",
+    "columns": [
+      { "id": "backlog", "name": "Backlog", "category": "backlog" },
+      { "id": "planning", "name": "Planning", "category": "unstarted" },
+      { "id": "implementing", "name": "Implementing", "category": "started" },
+      { "id": "validating", "name": "Validating", "category": "review" },
+      { "id": "complete", "name": "Complete", "category": "done", "humanOnly": true }
+    ],
+    "cards": [
+      {
+        "key": "abc-123",
+        "sessionId": "abc-123",
+        "runtime": "claude",
+        "title": "Fix the login page",
+        "phase": "implementing",
+        "tags": ["auth"],
+        "updated": 1757300000000,
+        "branch": "task/abc-fix-login",
+        "worktree": "/repo/.agentskanban/worktrees/abc",
+        "agent": {
+          "kind": "working",
+          "tool": "Bash",
+          "lastEventAt": 1757300000000,
+          "contextTokens": 82000,
+          "contextWindow": 1000000
+        }
+      }
+    ],
+    "selectedKey": "abc-123",
+    "transcript": [
+      { "kind": "prompt", "at": 1757299000000, "text": "Fix the login page — the button does nothing when clicked.", "id": "abc-123-msg-1" },
+      { "kind": "thinking", "at": 1757299010000, "text": "The click handler references a function that was renamed during the last refactor. I'll confirm by reading the component, then patch the handler and rebuild." },
+      { "kind": "tool", "at": 1757299020000, "id": "t1", "name": "Read", "summary": "Read src/login.ts", "status": "ok", "durationMs": 900 },
+      { "kind": "tool", "at": 1757299030000, "id": "t2", "name": "Bash", "summary": "npm run build", "status": "ok", "durationMs": 34000 },
+      { "kind": "text", "at": 1757299400000, "text": "Found it — the `onClick` handler called `handleSubmit`, which was renamed to `handleLogin` in the last refactor. I fixed the reference and the build passes.", "model": "claude-opus-5" },
+      { "kind": "result", "at": 1757299410000, "summary": "Fixed the login button by repairing the renamed handler reference.", "durationMs": 51000, "costUsd": 0.12 }
+    ],
+    "review": {
+      "base": "main",
+      "ahead": 2,
+      "dirty": 3,
+      "files": [
+        { "path": "src/login.ts", "status": "M", "committed": false },
+        { "path": "src/auth.ts", "status": "A", "committed": true },
+        { "path": "test/login.test.ts", "status": "M", "committed": false }
+      ],
+      "lastCommit": { "sha": "4de7c7c", "message": "Fix login button handler" }
+    },
+    "composer": {
+      "model": "claude-opus-5",
+      "effort": "high",
+      "thinking": "enabled",
+      "efforts": [
+        { "key": "low", "label": "Low" },
+        { "key": "high", "label": "High" }
+      ],
+      "thinkingSupported": true,
+      "contextTokens": 0,
+      "permissionMode": "acceptEdits",
+      "permissionModes": [
+        { "key": "default", "label": "Ask", "detail": "Prompt before anything that writes" },
+        { "key": "acceptEdits", "label": "Auto-accept edits", "detail": "File edits go through" },
+        { "key": "auto", "label": "Auto", "detail": "Let Claude Code choose per tool" }
+      ],
+      "agent": "claude|inherit",
+      "agents": [
+        { "key": "claude|inherit", "label": "Claude Code", "detail": "CLI login", "runtime": "claude", "provider": "inherit" },
+        { "key": "claude|openrouter", "label": "Claude Code · OpenRouter", "detail": "gateway", "runtime": "claude", "provider": "openrouter" }
+      ],
+      "runtime": "claude",
+      "runtimes": [{ "id": "claude", "label": "Claude Code", "providerProfiles": true }],
+      "provider": "inherit",
+      "providers": [{ "id": "inherit", "label": "CLI login", "detail": "", "support": "first-party" }],
+      "orchestration": "balanced",
+      "orchestrationLevels": [
+        { "key": "minimal", "label": "Minimal", "detail": "One agent unless it must split" },
+        { "key": "balanced", "label": "Balanced", "detail": "A few pieces when they are independent" },
+        { "key": "maximum", "label": "Maximum", "detail": "Split whenever parallel work helps" }
+      ],
+      "voice": { "mode": "whisper", "available": true }
+    },
+    "running": 1,
+    "waiting": 0
+  }
+}

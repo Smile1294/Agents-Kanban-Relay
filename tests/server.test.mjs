@@ -1,10 +1,10 @@
-/* The plain-Node host, exercised for real: server.js is spawned as a
- * child process on an ephemeral port with a throwaway data directory, and the
- * relay contract — update/read/command/ack round-trips, the static page, the
- * body cap, persistence across a restart — is driven over real HTTP.
+/* The plain-Node host, exercised for real: server.js is spawned as a child
+ * process on an ephemeral port with a throwaway data directory, and the relay
+ * contract — frame round-trips, the static page, the media/bridge routes, the
+ * 5 MB body bound, and true long-poll (`wait`) — is driven over real HTTP.
  *
- * This is the deployable the howToTest rides on, so it is the host that gets
- * the whole round trip rather than the injected store.
+ * This is the deployable the howToTest rides on, and the only host that holds
+ * a request open, so the long-poll behaviour is pinned here.
  */
 import { spawn } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -49,55 +49,62 @@ const stop = (child) => new Promise((resolve) => {
 })
 
 const ID = 'a'.repeat(24)
-const index = (at) => ({
-  v: 1, at, writes: false,
-  columns: [{ id: 'backlog', name: 'Backlog' }],
-  sessions: { abc: { key: 'abc', title: 'Fix it', phase: 'backlog', tags: [], archived: false, updated: at, tv: 1 } },
-})
-const update = (at) => ({
+const STATE = { ready: true, mode: 'kanban', columns: [], cards: [] }
+const frame = (at, state = STATE, models) => ({
   method: 'POST',
   headers: { 'content-type': 'application/json', 'x-rc-key': ID },
-  body: JSON.stringify({ kind: 'update', index: index(at), tails: [] }),
+  body: JSON.stringify({ kind: 'frame', at, writes: false, mv: 'v1', state, models }),
 })
 
 const tmp = await mkdtemp(join(tmpdir(), 'rc-relay-'))
 const s1 = await startServer(tmp)
 
-// --- static page and routing --------------------------------------------------
+// --- static page and routes --------------------------------------------------
 
 {
   const home = await fetch(s1.base + '/')
   ok(home.status === 200 && (await home.text()).includes('Remote board'),
-    'the site root serves the viewer page')
-  const css = await fetch(s1.base + '/board.css')
-  ok(css.status === 200 && (css.headers.get('content-type') || '').includes('text/css'),
-    'board.css serves with a css content type')
-  const js = await fetch(s1.base + '/board.js')
-  ok(js.status === 200 && (await js.text()).includes('sendCommand'),
-    'board.js serves, and carries the write-channel composer')
+    'the site root serves the page')
+  const theme = await fetch(s1.base + '/media/theme.css')
+  ok(theme.status === 200 && (theme.headers.get('content-type') || '').includes('text/css'),
+    'media/theme.css serves with a css content type')
+  const boardCss = await fetch(s1.base + '/media/board.css')
+  ok(boardCss.status === 200 && (boardCss.headers.get('content-type') || '').includes('text/css'),
+    'media/board.css serves with a css content type')
+  const boardJs = await fetch(s1.base + '/media/board.js')
+  ok(boardJs.status === 200 && (await boardJs.text()).includes('acquireVsCodeApi'),
+    'media/board.js serves, and is the real webview script')
+  const bridgeJs = await fetch(s1.base + '/bridge.js')
+  ok(bridgeJs.status === 200 && (await bridgeJs.text()).includes('acquireVsCodeApi'),
+    'bridge.js serves, and defines the webview API')
+  const bridgeCss = await fetch(s1.base + '/bridge.css')
+  ok(bridgeCss.status === 200 && (bridgeCss.headers.get('content-type') || '').includes('text/css'),
+    'bridge.css serves with a css content type')
   const miss = await fetch(s1.base + '/board.css/../server.js')
   ok(miss.status === 404, 'a path that is not on the whitelist is 404, never a file')
 }
 
-// --- the relay round trip -----------------------------------------------------
+// --- the frame round trip ----------------------------------------------------
 
 {
   const before = await fetch(s1.base + '/board?id=' + ID)
   ok(before.status === 404, 'no board yet: the first push has not happened')
-  const pushed = await fetch(s1.base + '/board', update(1000))
-  ok(pushed.status === 200 && (await pushed.json()).ok === true, 'an update is accepted')
+  const pushed = await fetch(s1.base + '/board', frame(1000, { ready: true }))
+  ok(pushed.status === 200 && (await pushed.json()).ok === true, 'a frame is accepted')
   const got = await fetch(s1.base + '/board?id=' + ID)
-  ok(got.status === 200 && (await got.json()).index.sessions.abc.title === 'Fix it',
-    'the index reads back over HTTP')
+  const json = await got.json()
+  ok(got.status === 200 && json.frame && json.frame.state.ready === true,
+    'the frame reads back over HTTP')
+  ok(json.longPoll === true, 'a plain Node GET answer carries longPoll:true')
   const noKey = await fetch(s1.base + '/board?id=' + ID, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ kind: 'update', index: index(2000), tails: [] }),
+    body: JSON.stringify({ kind: 'frame', at: 2000, writes: false, mv: '', state: { ready: true } }),
   })
   ok(noKey.status === 401, 'a POST without the board key is refused — the write gate holds over HTTP')
 }
 
-// --- the command channel, end to end ------------------------------------------
+// --- the model catalogue and the message queue, end to end -------------------
 
 {
   const post = (body) => fetch(s1.base + '/board', {
@@ -105,36 +112,66 @@ const s1 = await startServer(tmp)
     headers: { 'content-type': 'application/json', 'x-rc-key': ID },
     body: JSON.stringify(body),
   })
-  const queued = await post({ kind: 'command', nonce: 'n1', text: 'fix the build', session: 'abc' })
-  ok(queued.status === 200, 'a command is queued')
-  const poll = await fetch(s1.base + '/board?id=' + ID + '&cmds=1')
-  const { cmds } = await poll.json()
-  ok(Array.isArray(cmds) && cmds.length === 1 && cmds[0].nonce === 'n1' && cmds[0].session === 'abc',
-    'the command reads back on the dedicated poll')
+  const pushed = await post({ kind: 'frame', at: 3000, writes: false, mv: 'v2', state: STATE, models: [{ id: 'claude-opus-5', label: 'Opus 5' }] })
+  ok(pushed.status === 200, 'a frame with a model catalogue is accepted')
+  const models = await fetch(s1.base + '/board?id=' + ID + '&models=1')
+  const mjson = await models.json()
+  ok(models.status === 200 && mjson.mv === 'v2' && mjson.models[0].label === 'Opus 5',
+    'the catalogue reads back on ?models=1')
+
+  const queued = await post({ kind: 'msg', nonce: 'n1', msg: { type: 'select', id: 'abc' } })
+  ok(queued.status === 200, 'a message is queued')
+  const poll = await fetch(s1.base + '/board?id=' + ID + '&msgs=1')
+  const { msgs } = await poll.json()
+  ok(Array.isArray(msgs) && msgs.length === 1 && msgs[0].nonce === 'n1', 'the message reads back on ?msgs=1')
   const acked = await post({ kind: 'ack', nonces: ['n1'] })
   ok(acked.status === 200, 'the ack is accepted')
-  const after = await fetch(s1.base + '/board?id=' + ID + '&cmds=1')
-  ok((await after.json()).cmds.length === 0, '…and the queue is empty after it')
 }
 
-// --- the body cap -------------------------------------------------------------
+// --- the body bound: 5 MB reaches the handler, 6 MB is refused at transport ---
 
 {
-  const big = await fetch(s1.base + '/board', {
+  const bigState = { blob: 'x'.repeat(4_900_000) } // over the 4 MB frame cap, under the 5 MB transport
+  const five = await fetch(s1.base + '/board', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-rc-key': ID },
-    body: 'x'.repeat(1024 * 1024 + 1),
+    body: JSON.stringify({ kind: 'frame', at: 1, writes: false, mv: '', state: bigState }),
   })
-  ok(big.status === 413, 'a body past the cap is refused 413, not buffered')
+  ok(five.status === 413 && (await five.json()).error.includes('larger than the relay'),
+    'a ~5 MB body reaches the handler — its own frame cap answers, not the transport')
+
+  const six = await fetch(s1.base + '/board', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-rc-key': ID },
+    body: 'x'.repeat(6 * 1024 * 1024),
+  })
+  ok(six.status === 413 && (await six.json()).error.includes('request body too large'),
+    'a 6 MB body is refused 413 at the transport, not buffered')
 }
 
-// --- persistence across a restart ---------------------------------------------
+// --- true long-poll ----------------------------------------------------------
+
+{
+  const start = Date.now()
+  const lp = fetch(s1.base + '/board?id=' + ID + '&since=2&wait=5')
+  // Give the poll a moment to hold, then push a new frame mid-wait.
+  await new Promise((r) => setTimeout(r, 300))
+  const pushed = await fetch(s1.base + '/board', frame(Date.now(), { ready: true, v: 2 }))
+  ok(pushed.status === 200, 'the frame that wakes the long-poll is accepted')
+  const res = await lp
+  const json = await res.json()
+  ok(Date.now() - start < 4_500, 'a wait poll returns EARLY when a frame lands mid-wait')
+  ok(json.longPoll === true && json.seq === 3, '…and it sees the new frame')
+}
+
+// --- persistence across a restart --------------------------------------------
 
 await stop(s1.child)
 const s2 = await startServer(tmp)
 {
   const got = await fetch(s2.base + '/board?id=' + ID)
-  ok(got.status === 200 && (await got.json()).index.sessions.abc.title === 'Fix it',
+  const json = await got.json()
+  ok(got.status === 200 && json.frame && json.frame.state.v === 2,
     'the board survives a restart — the store is a file, not memory')
 }
 await stop(s2.child)

@@ -1,0 +1,1429 @@
+:root {
+  --gap: 10px;
+  --radius: 8px;
+  --line: var(--vscode-widget-border, rgba(128,128,128,0.22));
+  --panel: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  --muted: color-mix(in srgb, var(--vscode-foreground) 62%, transparent);
+  --faint: color-mix(in srgb, var(--vscode-foreground) 38%, transparent);
+  --ok: var(--vscode-charts-green, #89d185);
+  --run: var(--vscode-charts-blue, #3794ff);
+  --warn: var(--vscode-charts-yellow, #cca700);
+  --bad: var(--vscode-charts-red, #f14c4c);
+  --violet: var(--vscode-charts-purple, #b180d7);
+
+  /* --- control geometry: ONE set of sizes for every button and chip ---------
+     Measured on the composer bar before this existed: 13, 16, 18, 21 and 23px
+     of height on ONE row, because each control had its own padding and font
+     and nothing fixed the height — an emoji glyph raised the line box of every
+     chip that carried one by 5px. Reported as "the button sizes vary a lot".
+     Every control now takes its size from these tokens: the `button` base
+     rule below IS the standard control, `.ctl` is the same geometry as a
+     class for the chips that are not buttons, and the three variants are the
+     only other sizes that exist. Add a fourth here, not inline. */
+  --ctl-h: 24px;        /* a button or a chip */
+  --ctl-h-lg: 32px;     /* the composer's input row */
+  --ctl-h-xs: 20px;     /* actions inside a card, where 300px is the whole width */
+  --ctl-px: 10px;
+  --ctl-px-sm: 8px;
+  --ctl-fs: 12px;
+  --ctl-fs-sm: 11.5px;
+  --ctl-radius: 5px;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+  overflow: hidden;
+}
+
+.shell { display: flex; height: 100%; min-height: 0; }
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+/* A button IS a control: the standard height, centred contents, the standard
+   type. Anything that is a button only in markup — a menu row, a file row, an
+   inline glyph like the kebab — opts out below, in one list, rather than every
+   real button opting in. `min-height` rather than `height`, so a row of two
+   lines can still be a button. */
+button {
+  font: inherit;
+  font-size: var(--ctl-fs);
+  line-height: 1.2;
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  background: var(--vscode-button-secondaryBackground, transparent);
+  border: 1px solid var(--line);
+  border-radius: var(--ctl-radius);
+  padding: 0 var(--ctl-px);
+  min-height: var(--ctl-h);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+button:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); }
+button.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border-color: transparent; }
+button.primary:hover { background: var(--vscode-button-hoverBackground); }
+button.pill { border-radius: 999px; padding: 0 12px; }
+button.pill.on { background: color-mix(in srgb, var(--run) 22%, transparent); border-color: var(--run); color: var(--vscode-foreground); }
+button[disabled] { cursor: default; }
+.spacer { flex: 1; }
+
+/* The same geometry as a CLASS, for the chips on the composer bar — some of
+   them are readouts in a <span>, not buttons, and they must be the same height
+   as the buttons beside them. `height`, not `min-height`, and `overflow:
+   hidden`: a chip is one line, and an emoji in it must not be allowed to make
+   it taller than its neighbour. `layout.test.mjs` measures every .ctl on the
+   bar and fails if two of them differ. */
+.ctl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: var(--ctl-h);
+  padding: 0 var(--ctl-px);
+  font-size: var(--ctl-fs);
+  line-height: 1;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  border-radius: var(--ctl-radius);
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+.ctl-lg { height: var(--ctl-h-lg); }
+.ctl-xs { height: var(--ctl-h-xs); padding: 0 var(--ctl-px-sm); font-size: var(--ctl-fs-sm); }
+/* A square: an icon and nothing else. */
+.ctl-icon { width: var(--ctl-h); padding: 0; flex: none; }
+.ctl-lg.ctl-icon { width: var(--ctl-h-lg); }
+/* A readout in the shape of a control: same size and rhythm, no affordance. */
+.ctl-static { cursor: default; }
+/* No box at all — a group of figures that sits on the bar at control height. */
+.ctl-bare { border-color: transparent; background: transparent; padding: 0; }
+/* The parts of a chip. The glyph slot is FIXED width and its own line-height,
+   which is what stops an emoji from resizing the chip; the label is the one
+   part allowed to shrink, and it ellipsises rather than pushing the bar. */
+.ctl-ico { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 1.25em; line-height: 1; }
+.ctl-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctl-caret { flex: none; opacity: 0.7; font-size: 0.85em; margin-left: -1px; }
+
+/* Buttons that are not controls: list rows, and the small inline glyphs. They
+   keep their own shape; the base rule's height and centring do not apply.
+   `min-height: auto` is load-bearing, not tidy: these rows sit in COLUMN flex
+   containers (`.menu-list`, `.review-files`) with a bounded height, and a
+   flex item's automatic minimum is what stops it shrinking below its content.
+   The base rule's `min-height: 24px` REPLACED that automatic minimum, so
+   twenty model rows squeezed into a 320px list at 24px each, two lines of text
+   crushed into one — measured by layout.test.mjs as a "two lines" row of 24px. */
+.menu-item, .review-file, .merge-file, .control-item, .subtask, .slash-item,
+.mention-item, .ask-opt {
+  justify-content: flex-start;
+  /* `stretch`, the flex default the base rule's `center` took away: a menu
+     row is a COLUMN, and its label only ellipsises if it is stretched to the
+     row's width — centred, it is as wide as its text and overflows the menu. */
+  align-items: stretch;
+  min-height: auto;
+}
+.kebab, .pick, .codeblock-copy, .prompt-retry, .attachment-x, .subtask-of {
+  min-height: 0;
+  display: inline-block;
+}
+
+/* ------------------------------------------------------------------ rail */
+
+.rail {
+  flex: 0 0 258px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+  background: var(--vscode-sideBar-background, var(--panel));
+  min-height: 0;
+  /* Same trap as `.tool-text`, one level up and far more destructive: a flex
+     item will not shrink below its content unless told to, so `flex: 0 0 258px`
+     was a request, not a width. One session titled with an unbroken 200-char
+     token stretched the rail to 1350px and left the transcript beside it 0px
+     wide — the chat did not look wrong, it looked EMPTY. */
+  min-width: 0;
+}
+.rail-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 8px; flex-wrap: wrap; }
+.rail-title { font-size: 0.78em; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+/* The rail head now holds two pills (mode + search). The FIRST one takes the
+   auto margin that pins the pair to the right edge; the second follows it at
+   the head's own gap. With an auto margin on every pill they split the free
+   space and drift apart mid-head. And the head wraps: at narrow window widths
+   the pills drop to their own line rather than shoving the title into
+   ellipsis — a wrapped chip row reads as deliberate, a truncated title does
+   not. */
+.rail-head .pill:first-of-type { margin-left: auto; }
+.search, .composer textarea, .ts-input {
+  font: inherit;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--line));
+  border-radius: 5px;
+  padding: 5px 9px;
+}
+.search { margin: 0 12px 8px; }
+.search:focus, .composer textarea:focus, .ts-input:focus { outline: 1px solid var(--vscode-focusBorder); border-color: var(--vscode-focusBorder); }
+.new-session { margin: 0 12px 10px; }
+.rail-list { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
+.rail-group {
+  display: flex; align-items: center;
+  padding: 10px 4px 5px;
+  font-size: 0.72em; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint);
+}
+.rail-group .n { margin-left: auto; }
+.rail-item { padding: 7px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+.rail-item:hover { background: var(--vscode-list-hoverBackground); }
+.rail-item.active { background: var(--vscode-list-activeSelectionBackground); border-color: var(--vscode-focusBorder); }
+.rail-item-top { display: flex; align-items: center; gap: 6px; }
+.rail-item-top .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-item-sub { display: flex; align-items: center; gap: 8px; margin-top: 3px; padding-left: 20px; font-size: 0.76em; color: var(--faint); }
+.ai { color: var(--violet); flex: none; font-size: 0.9em; }
+
+/* --------------------------------------------------------------- toolbar */
+
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+.count { color: var(--muted); font-size: 0.85em; font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------------- kanban */
+
+.board { flex: 1; display: flex; gap: var(--gap); padding: var(--gap); overflow-x: auto; align-items: stretch; min-height: 0; }
+/* Share the width rather than pinning it: five fixed 264px columns plus the
+   rail overflow a 1440px laptop, so the last column — Complete, the one that
+   matters — sat off-screen behind a horizontal scroll. They grow on a wide
+   monitor, stop at a readable maximum, and only scroll below ~200px each. */
+.column {
+  flex: 1 1 0; min-width: 208px; max-width: 340px;
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.column.drag-over { border-color: var(--vscode-focusBorder); }
+.column-head {
+  display: flex; align-items: center; gap: 7px; padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.76em; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted);
+}
+.column-head .n { margin-left: auto; font-weight: 400; }
+.column-head .lock { opacity: 0.6; }
+.cards { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+
+.card {
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--line);
+  border-left: 3px solid transparent;
+  border-radius: 6px; padding: 9px 11px; cursor: pointer; user-select: none;
+}
+.card:hover { border-color: var(--vscode-focusBorder); }
+.card.dragging { opacity: 0.4; }
+.card.running { border-left-color: var(--run); }
+.card.needs-input { border-left-color: var(--warn); }
+.card.failed { border-left-color: var(--bad); }
+/* NOT flex. A card title is often a pasted URL — one token with no spaces in
+   it — and a bare text node in a flex container is an anonymous flex item that
+   no rule can reach, so it overflowed the card and spilled its tail onto the
+   next line. Inline content plus `overflow-wrap: anywhere` breaks the URL where
+   it has to, and the clamp keeps one long title from making a card three times
+   the height of its neighbours. */
+.card .title {
+  font-weight: 500; line-height: 1.35;
+  overflow-wrap: anywhere; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.card .title .ai { margin-right: 6px; }
+.card .meta { display: flex; align-items: center; gap: 8px; margin-top: 7px; font-size: 0.76em; color: var(--faint); }
+.card .meta .id { font-variant-numeric: tabular-nums; }
+.card .branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 130px; }
+
+.labels { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 7px; align-items: center; }
+.label {
+  font-size: 0.72em; padding: 1px 7px; border-radius: 4px;
+  background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+  color: var(--muted);
+}
+
+.chip { font-size: 0.72em; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.chip.cat-backlog { border-color: var(--faint); }
+.chip.cat-unstarted { border-color: var(--run); color: var(--run); }
+.chip.cat-started { border-color: var(--warn); color: var(--warn); }
+.chip.cat-review { border-color: var(--violet); color: var(--violet); }
+.chip.cat-done { border-color: var(--ok); color: var(--ok); }
+
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--run); }
+.dot.cat-backlog { background: var(--faint); }
+.dot.cat-unstarted { background: var(--run); }
+.dot.cat-started { background: var(--warn); }
+.dot.cat-review { background: var(--violet); }
+.dot.cat-done { background: var(--ok); }
+.dot.pulse { animation: pulse 1.4s ease-in-out infinite; }
+/* The checkable half of "it is working": the age of the last frame from the
+   CLI. Muted while it is short, and marked once it is long enough to mean
+   something is probably wrong. */
+.agent-row .age { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--faint); font-size: 0.94em; }
+.agent-row .age.stale { color: var(--vscode-charts-yellow, #cca700); }
+.dot.warn { background: var(--warn); } .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.25 } }
+
+.agent { margin-top: 9px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.agent-row { display: flex; align-items: center; gap: 7px; font-size: 0.8em; color: var(--muted); }
+
+.ask {
+  margin-top: 8px; padding: 8px 9px; border-radius: 5px; font-size: 0.8em;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+}
+.ask-h { color: var(--warn); font-weight: 600; margin-bottom: 4px; }
+/* A Task's subagent transcript, nested under the Task row. Indented with a
+   rule down the left so it reads as "inside that call" rather than as more of
+   the main thread. */
+.tool-group { display: flex; flex-direction: column; }
+.subagent { margin: 2px 0 4px 18px; border-left: 2px solid var(--vscode-widget-border, #313131); padding-left: 10px; }
+.subagent > summary { cursor: pointer; color: var(--muted); font-size: 0.86em; padding: 2px 0; list-style: none; }
+.subagent > summary::before { content: '▸ '; }
+.subagent[open] > summary::before { content: '▾ '; }
+.subagent > summary::-webkit-details-marker { display: none; }
+.subagent-body { display: flex; flex-direction: column; gap: 4px; padding: 4px 0 2px; }
+
+/* The running indicator at the foot of the transcript. */
+.activity { display: flex; align-items: center; gap: 8px; padding: 10px 12px; margin-top: 4px;
+  border-radius: 6px; background: var(--vscode-editorWidget-background, #202020);
+  border: 1px solid var(--vscode-widget-border, #313131); color: var(--muted); font-size: 0.92em; }
+.activity-what { font-weight: 500; color: var(--vscode-foreground, #ccc); }
+.activity-sep { opacity: 0.5; }
+.activity-age { font-variant-numeric: tabular-nums; }
+.activity-age.stale { color: var(--vscode-charts-yellow, #cca700); font-weight: 600; }
+.spinner { width: 13px; height: 13px; flex: none; border-radius: 50%;
+  border: 2px solid var(--vscode-widget-border, #3c3c3c);
+  border-top-color: var(--vscode-charts-blue, #3794ff);
+  animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg) } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s } }
+
+.ask code { display: block; word-break: break-all; font-family: var(--vscode-editor-font-family); font-size: 0.95em; }
+.row-actions { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+/* Inside a card or a prompt the whole width is ~300px, so these are the
+   compact size. The review panel's and the merge banner's actions are full
+   controls: they sit in the chat, where there is room. */
+.ask .row-actions > button, .card .row-actions > button {
+  min-height: var(--ctl-h-xs); padding: 0 var(--ctl-px-sm); font-size: var(--ctl-fs-sm);
+}
+
+/* An AskUserQuestion picker. A question is not a permission request, so it does
+   not borrow the warning colour the Allow/Deny prompt uses — the agent is
+   waiting on a decision, not warning about one. */
+.ask.ask-questions {
+  background: var(--vscode-editorWidget-background, #202020);
+  border-color: var(--vscode-widget-border, #313131);
+}
+.ask.ask-questions .ask-h { color: var(--vscode-foreground); }
+.ask-q { margin-top: 9px; }
+.ask-q + .ask-q { padding-top: 9px; border-top: 1px solid var(--line); }
+.ask-q-head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 3px; }
+.ask-chip {
+  font-size: 0.85em; font-weight: 600; letter-spacing: 0.02em; padding: 1px 6px; border-radius: 999px;
+  background: color-mix(in srgb, var(--vscode-textLink-foreground, #4daafc) 20%, transparent);
+  color: var(--vscode-textLink-foreground, #4daafc);
+}
+.ask-hint { font-size: 0.85em; color: var(--muted); }
+.ask-q-text { margin-bottom: 6px; line-height: 1.35; overflow-wrap: anywhere; }
+.ask-options { display: flex; flex-direction: column; gap: 4px; }
+/* Each option is a button, not a radio: the label and its explanation both have
+   to be clickable, and a native radio cannot carry two lines of text. */
+.ask-opt {
+  display: flex; flex-direction: column; gap: 2px; align-items: flex-start; width: 100%;
+  text-align: left; padding: 6px 8px; border-radius: 4px; font-size: 1em;
+  background: var(--vscode-input-background, #2b2b2b);
+  border: 1px solid var(--vscode-widget-border, #313131);
+  /* Without this a long description makes the whole column refuse to shrink —
+     the min-width:auto trap that has bitten this stylesheet twice. */
+  min-width: 0;
+}
+.ask-opt:hover { border-color: var(--vscode-focusBorder, #4daafc); }
+.ask-opt.on {
+  border-color: var(--vscode-focusBorder, #4daafc);
+  background: color-mix(in srgb, var(--vscode-focusBorder, #4daafc) 16%, transparent);
+}
+.ask-opt-label { font-weight: 600; overflow-wrap: anywhere; }
+.ask-opt.on .ask-opt-label::after { content: ' ✓'; }
+.ask-opt-desc { color: var(--muted); font-size: 0.92em; line-height: 1.3; white-space: normal; overflow-wrap: anywhere; }
+.ask-other {
+  margin-top: 5px; width: 100%; box-sizing: border-box; padding: 5px 8px; border-radius: 4px;
+  font-family: inherit; font-size: 1em;
+  background: var(--vscode-input-background, #2b2b2b);
+  color: var(--vscode-input-foreground, inherit);
+  border: 1px dashed var(--vscode-widget-border, #313131);
+}
+.ask-other.on { border-style: solid; border-color: var(--vscode-focusBorder, #4daafc); }
+.ask-other:focus { outline: 1px solid var(--vscode-focusBorder, #4daafc); }
+.ask-questions .row-actions button[disabled] { opacity: 0.5; cursor: default; }
+
+/* ------------------------------------------------------------------ chat */
+
+.chat-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+/* A disabled button in this row USED to be a blink — `busy` clears itself when
+   the merge returns. A merge waiting for review does not: Merge stays dead
+   until the user commits or aborts it, so a control that still looks clickable
+   is one they will press and press again. The tooltip says why. */
+.chat-head button[disabled] { opacity: 0.45; cursor: default; }
+.chat-titles { min-width: 0; }
+.chat-title { font-weight: 600; font-size: 1.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-titles .labels { margin-top: 4px; }
+
+.transcript-scroll { flex: 1; overflow-y: auto; padding: 16px 18px 8px; display: flex; flex-direction: column; gap: 12px; }
+
+/* The wrapper the pagination and jump controls overlay. Takes the flex role
+   the scroll container used to hold directly under .main, so the scroll box
+   itself keeps exactly the box it had before the wrapper existed. */
+.transcript-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.transcript-wrap .transcript-scroll { flex: 1; }
+
+/* "Load earlier messages" — upward pagination. Floats over the top edge of
+   the transcript so it takes no flow space; a solid backdrop keeps it legible
+   over whichever row it covers. */
+.load-earlier {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 2;
+  border-radius: 999px; padding: 0 14px;
+  background: var(--vscode-button-background, var(--vscode-button-secondaryBackground));
+  color: var(--vscode-button-foreground, var(--vscode-foreground));
+  border-color: transparent; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+.load-earlier.busy { opacity: 0.6; pointer-events: none; }
+
+/* Jump-to-top / jump-to-latest. Bottom-right of the transcript, offset right
+   to stay clear of the scrollbar. The buttons carry their own background and
+   shadow because they OVERLAY the transcript: the last row's text runs
+   beneath them when the chat is scrolled to the bottom, and transparent
+   buttons over text are illegible. Same treatment as the load-earlier pill,
+   so the two overlays read as one family. */
+.jump-cluster { position: absolute; right: 20px; bottom: 10px; display: flex; gap: 6px; z-index: 2; }
+.jump-cluster button {
+  opacity: 0.85;
+  background: var(--vscode-editor-background, var(--vscode-sideBar-background, #1e1e1e));
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+.jump-cluster button:hover { opacity: 1; }
+
+.block { display: flex; flex-direction: column; gap: 5px; }
+.block-head { display: flex; align-items: baseline; gap: 8px; }
+.who { font-weight: 600; font-size: 0.86em; }
+.at { font-size: 0.74em; color: var(--faint); font-variant-numeric: tabular-nums; }
+.prompt {
+  padding: 9px 12px; border-radius: 6px; white-space: pre-wrap; word-break: break-word;
+  background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+  border-left: 2px solid var(--faint);
+}
+/* The agent's answer, rendered from markdown by board.js. Breaks come from the
+   renderer now, so no pre-wrap; `min-width: 0` so a wide table or a long code
+   line scrolls inside its own box instead of widening the transcript — the
+   same flex trap as `.tool-text`, one level up. */
+.assistant-text { line-height: 1.55; min-width: 0; overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 0.7em; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1.1em 0 0.45em; line-height: 1.3; font-weight: 600; }
+.md h1 { font-size: 1.25em; }
+.md h2 { font-size: 1.15em; }
+.md h3 { font-size: 1.05em; }
+.md h4, .md h5, .md h6 { font-size: 1em; }
+.md ul, .md ol { margin: 0 0 0.7em; padding-left: 1.6em; }
+.md li { margin: 0.15em 0; }
+.md li > ul, .md li > ol { margin-bottom: 0; }
+.md blockquote {
+  margin: 0 0 0.7em; padding: 2px 12px;
+  border-left: 3px solid var(--vscode-textBlockQuote-border, var(--line));
+  background: var(--vscode-textBlockQuote-background, transparent);
+  color: var(--muted);
+}
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 1em 0; }
+.md a { color: var(--vscode-textLink-foreground, var(--run)); text-decoration: none; }
+.md a:hover { text-decoration: underline; }
+.md code {
+  font-family: var(--vscode-editor-font-family, monospace); font-size: 0.9em;
+  padding: 1px 3px; border-radius: 4px;
+  background: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-foreground) 8%, transparent));
+}
+.codeblock {
+  margin: 0 0 0.8em; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--vscode-textCodeBlock-background, var(--panel));
+  overflow: hidden;
+}
+.codeblock-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 3px 5px 3px 10px; border-bottom: 1px solid var(--line);
+  font-family: var(--vscode-editor-font-family, monospace); font-size: 0.74em; color: var(--faint);
+}
+.codeblock-copy { font: inherit; padding: 1px 8px; min-height: 0; border-color: transparent; background: transparent; color: var(--muted); }
+.codeblock-copy:hover { border-color: var(--line); }
+.codeblock pre {
+  margin: 0; padding: 10px 12px; overflow-x: auto;
+  font-family: var(--vscode-editor-font-family, monospace); font-size: 0.88em; line-height: 1.5; tab-size: 4;
+}
+.codeblock pre code { padding: 0; border-radius: 0; background: none; font-size: inherit; white-space: pre; overflow-wrap: normal; }
+.table-wrap { overflow-x: auto; max-width: 100%; margin: 0 0 0.8em; }
+.md table { border-collapse: collapse; font-size: 0.92em; }
+.md th, .md td { border: 1px solid var(--line); padding: 4px 9px; text-align: left; vertical-align: top; white-space: nowrap; }
+.md th { background: var(--panel); font-weight: 600; }
+
+.tool {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--panel);
+  font-family: var(--vscode-editor-font-family); font-size: 0.82em; color: var(--muted);
+}
+.tool-mark { color: var(--faint); flex: none; }
+/* `min-width: 0` is what makes the ellipsis work at all. A flex item defaults
+   to `min-width: auto` — it refuses to shrink below its content — so a long
+   MCP summary pushed the whole row wider than the transcript instead of being
+   truncated, carrying the status mark (and the timing) off the right edge.
+   `overflow: hidden` cannot help while the box is never made small. */
+.tool-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-status { flex: none; }
+.tool.status-ok .tool-status { color: var(--ok); }
+.tool.status-error { border-color: color-mix(in srgb, var(--bad) 50%, transparent); }
+.tool.status-error .tool-status { color: var(--bad); }
+.tool.status-running .tool-status { color: var(--faint); }
+/* The timing on a tool row. `flex: none` and tabular numerals so a ticking
+   counter cannot reflow the row it sits on, and `.tool-text` keeps its ellipsis
+   rather than being squeezed by a number that grows a digit every ten seconds. */
+.tool-time { flex: none; font-variant-numeric: tabular-nums; color: var(--faint); }
+.tool-time.stale, .tool-time.slow { color: var(--vscode-charts-yellow, #cca700); }
+
+/* ---------------------------------------------------------------- subtasks */
+
+/* The thread between a split task and the pieces it became. A subtask names its
+   parent; the parent lists its subtasks and how many are ready. Both are
+   buttons: the relationship is only useful if you can follow it. */
+.subtask-of {
+  display: block; width: 100%; text-align: left; min-height: 0;
+  background: none; border: 0; padding: 0 0 3px;
+  font: inherit; font-size: 0.78em; color: var(--muted); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.subtask-of:hover { color: var(--vscode-foreground); text-decoration: underline; }
+
+.subtasks { margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.subtasks-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; background: var(--panel);
+  font-size: 0.76em; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--muted);
+}
+.subtasks-count { font-variant-numeric: tabular-nums; letter-spacing: 0; text-transform: none; }
+.subtasks.all-ready .subtasks-count { color: var(--ok); }
+.subtasks.all-ready { border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.subtask {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 6px 8px; background: none; border: 0; border-top: 1px solid var(--line);
+  font: inherit; font-size: 0.82em; color: var(--vscode-foreground);
+  text-align: left; cursor: pointer;
+}
+.subtask:hover { background: var(--vscode-list-hoverBackground); }
+.subtask-mark { flex: none; color: var(--faint); }
+.subtask.ready .subtask-mark { color: var(--ok); }
+/* min-width: 0, or a long subtask title widens the card instead of ellipsing —
+   the same flex trap as `.tool-text` and `.rail`. */
+.subtask-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.session-meta { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.session-meta-h { padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 0.76em; font-weight: 700; letter-spacing: 0.07em; color: var(--muted); }
+.kv { display: grid; grid-template-columns: 72px 1fr; gap: 7px 12px; padding: 10px 12px; align-items: center; }
+.kv .k { font-size: 0.78em; color: var(--faint); }
+.kv .v { font-size: 0.86em; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.arrow { color: var(--faint); }
+
+.result { font-size: 0.8em; color: var(--faint); text-align: center; padding: 2px 0 6px; }
+.err {
+  padding: 9px 12px; border-radius: 6px; font-size: 0.86em;
+  color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+}
+
+.composer { display: flex; gap: 8px; align-items: flex-end; padding: 8px 14px 14px; }
+/* One line of the textarea is exactly the input-row control height, so the
+   three buttons beside it sit flush with a one-line draft and stay put while
+   it grows (they are fixed height; `align-self: stretch` would turn them into
+   towers). */
+.composer textarea {
+  flex: 1; resize: none; line-height: 1.4; max-height: 160px;
+  min-height: var(--ctl-h-lg); padding: 6px 10px;
+}
+
+/* ----------------------------------------------------------------- misc */
+
+.empty { padding: 16px 10px; color: var(--faint); font-size: 0.85em; text-align: center; }
+.setup { padding: 34px 24px; max-width: 480px; margin: 0 auto; text-align: center; }
+.setup h2 { font-size: 1.06em; margin: 0 0 8px; }
+.setup p { color: var(--muted); line-height: 1.55; margin: 0 0 16px; }
+
+.warn-note {
+  margin-top: 14px; padding: 9px 12px; border-radius: 6px;
+  font-size: 0.84em; line-height: 1.5; text-align: left;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+/* A menu footer: where the list above came from. Muted and non-interactive —
+   it is an explanation, not another choice. */
+.menu-note {
+  padding: 6px 10px; border-top: 1px solid var(--line);
+  color: var(--faint); font-size: 0.9em; line-height: 1.4;
+  max-width: 34ch; white-space: normal;
+}
+
+/* Provider disagreement, on the bar.
+   `min-width: 0` is not optional and this project has the postmortem: a flex
+   item defaults to `min-width: auto`, which refuses to shrink below its content
+   and so defeats `text-overflow: ellipsis` entirely — the note would push the
+   readouts off the bar instead of truncating, exactly as a card title once
+   overflowed its box by 94px with every text assertion green. The full sentence
+   lives in `title`. */
+.provider-note {
+  max-width: 26ch;
+  border-radius: 999px;
+  cursor: help;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+/* ---------------------------------------------- composer bar & controls */
+
+.composer-wrap { border-top: 1px solid var(--line); }
+.composer-bar {
+  /* WRAPS. `nowrap` was tried and is worse than the problem: flex shrinks
+     every picker toward zero before it gives up, and measuring showed all six
+     collapsing to 0px — six invisible controls, which is a far worse failure
+     than a taller bar. Every chip on it is a `.ctl` of ONE height, so a
+     wrapped bar is two even rows rather than a ragged one; `layout.test.mjs`
+     measures both the height and the evenness in real Chromium. */
+  display: flex; align-items: center; gap: 6px; row-gap: 4px; flex-wrap: wrap;
+  padding: 8px 12px 0;
+  /* So the rule below can ask how wide the BAR is, not the window: the chat
+     sits beside a 258px rail, and a 560px split editor leaves it ~300px. */
+  container-type: inline-size;
+}
+/* In a narrow pane the chips shed what is decorative — the AGENT badge, the
+   carets, a little padding — and keep their labels: a bar of bare glyphs is a
+   bar you have to hover to read. Nine controls plus the readouts then fit in
+   three even rows at 300px, where four rows would push into the transcript;
+   layout.test.mjs holds the bar under 90px at that width. */
+@container (max-width: 480px) {
+  .composer-bar .agent-badge { display: none; }
+  .composer-bar .ctl-caret { display: none; }
+  .composer-bar .ctl { padding: 0 6px; font-size: 11px; }
+  .composer-bar { gap: 5px; }
+}
+/* Chips are denser than buttons — smaller type, tighter padding — and exactly
+   the same height. That is the whole design of the bar. */
+.composer-bar .ctl { font-size: var(--ctl-fs-sm); padding: 0 var(--ctl-px-sm); }
+.composer-bar .ctl-icon { padding: 0; }
+.agent-badge {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  border-radius: 3px; border-color: transparent;
+  color: var(--vscode-charts-orange, #d18616);
+  background: color-mix(in srgb, var(--vscode-charts-orange, #d18616) 15%, transparent);
+}
+.picker-wrap { position: relative; display: inline-flex; max-width: 100%; }
+.picker {
+  background: transparent; border-color: var(--line); color: var(--muted);
+  cursor: pointer;
+}
+.picker:hover { color: var(--vscode-foreground); border-color: var(--vscode-focusBorder); }
+
+/* The settings gear: a square icon control, and it must NEVER wrap away. It is
+   the only path to the settings page once a session has started (the agent
+   picker's own entry disappears with it), so `flex: none` — from .ctl-icon —
+   keeps it on the bar however many pickers fill the rows in front of it. */
+.gear-btn { background: transparent; color: var(--muted); }
+.gear-btn:hover { color: var(--vscode-foreground); border-color: var(--vscode-focusBorder); }
+
+/* A readout in the shape of a picker: same size and rhythm on the bar, no
+   affordance and no caret. It says what this session is running on; that is
+   decided. A faint fill rather than a dashed border — dashed reads as
+   "disabled", and this is not disabled, it is settled. */
+.picker.static {
+  cursor: default;
+  background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+  color: var(--vscode-foreground);
+}
+.picker.static:hover { border-color: var(--line); }
+
+.ctx { font-variant-numeric: tabular-nums; color: var(--faint); }
+/* The two readouts that must never be squeezed out of the bar. `flex: none` and
+   `nowrap` because the pickers to their left will happily take the whole row —
+   and a spend figure wrapped to "$1." is worse than no figure at all. */
+/* The readouts travel as one group and are never squeezed. `flex: none` on
+   both the group and its members because everything to their left in the bar
+   is elastic and will take the whole row given the chance — and a clipped
+   number is worse than no number.
+   `order: 1` puts them AFTER the settings gear in the flex flow, which they
+   are not in the DOM: the gear is appended last so the readouts fast-path
+   keeps working, but flowing last is what strands it on a fourth line at
+   560px, where line three is exactly the width of the readouts and nothing
+   more. The gear packs against the spacer instead, and the readouts stay the
+   last thing on the bar, right-aligned, as the eye expects. */
+.readouts {
+  gap: 7px; flex: none;
+  margin-left: auto; order: 1;
+}
+.ctx, .spend { flex: none; white-space: nowrap; }
+.spend {
+  font-variant-numeric: tabular-nums; color: var(--faint);
+  padding-left: 8px; margin-left: 8px; border-left: 1px solid var(--line);
+}
+.spend.partial { font-style: italic; }
+/* A subscription session's meter is a percentage of a rolling window, not
+   dollars, so it is wider than a price and must not be mistaken for one. */
+.spend.plan { font-variant-numeric: normal; }
+/* "Could not read it" is dimmer than a real figure and never green. It renders
+   an em dash, and the width is fixed so the bar does not jump when a reading
+   arrives. */
+.spend.unknown { opacity: 0.65; min-width: 1.2em; text-align: right; }
+
+/* Attachments on the message being composed. Above the input, because they are
+   part of the message that has not been sent yet. */
+.attachments {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 14px 0;
+}
+.attachment { position: relative; flex: none; line-height: 0; }
+.attachment-thumb {
+  height: 56px; width: auto; max-width: 140px; object-fit: cover;
+  border: 1px solid var(--line); border-radius: 4px; display: block;
+}
+.attachment-x {
+  position: absolute; top: -6px; right: -6px;
+  width: 18px; height: 18px; min-height: 0; padding: 0; line-height: 16px; text-align: center;
+  border-radius: 9px; font-size: 12px; cursor: pointer;
+}
+.attachments-note { color: var(--faint); font-size: 0.8em; }
+.attach { flex: none; }
+/* What a sent message carried. The bytes are not kept, so this is a note. */
+.prompt-images { color: var(--faint); font-size: 0.85em; margin-top: 4px; }
+.prompt-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+/* "Try again from here": a quiet ghost under the prompt bubble, so it reads as
+   part of the row rather than a board control. Inherits the `button` base
+   (border + secondary background), so the transparent overrides below are what
+   keep it quiet — without them every prompt row carries a full button. */
+.prompt-retry {
+  font-size: 0.76em; padding: 1px 8px; min-height: 0; color: var(--faint);
+  background: transparent; border-color: transparent;
+}
+.prompt-retry:hover {
+  color: var(--run);
+  border-color: color-mix(in srgb, var(--run) 40%, transparent);
+  background: color-mix(in srgb, var(--run) 8%, transparent);
+}
+.prompt-retry:focus-visible {
+  color: var(--run); border-color: var(--vscode-focusBorder, var(--run));
+}
+.ctx-meter {
+  width: 68px; height: 4px; border-radius: 2px; overflow: hidden;
+  background: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+}
+.ctx-fill { display: block; height: 100%; background: var(--run); transition: width 0.3s ease; }
+.ctx-fill.hot { background: var(--bad); }
+
+
+/* ------------------------------------------------------------ menus */
+
+.kebab-wrap { position: relative; display: inline-flex; }
+.kebab {
+  border: none; background: transparent; color: var(--faint);
+  padding: 0 4px; line-height: 1; border-radius: 3px; font-size: 1.05em;
+  min-height: 0;
+}
+.kebab:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
+
+.menu {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 20;
+  min-width: 178px; padding: 4px;
+  display: flex; flex-direction: column;
+  background: var(--vscode-menu-background, var(--panel));
+  border: 1px solid var(--vscode-menu-border, var(--line));
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.32);
+  /* Absolute, not inherited: the same menu opens from a 13px card and from an
+     11.5px composer chip, and it read at two sizes. */
+  font-size: var(--ctl-fs);
+}
+.menu.up { top: auto; bottom: calc(100% + 4px); left: 0; right: auto; }
+.menu-item {
+  border: none; background: transparent; text-align: left;
+  padding: 5px 9px; border-radius: 4px; font-size: 1em;
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+}
+.menu-item:hover { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); }
+/* The tick goes on the NAME, not on the button.
+   A menu item is two lines now — the model, then its context window, price and
+   one-liner — and `.menu-item.on::after` put the tick on a third line of its
+   own, under the price, where it reads as a bullet rather than as "this one is
+   selected". */
+.menu-item.on > .menu-item-label::after { content: ' ✓'; color: var(--ok); }
+
+/* Two lines per option: what it is called, then what it is.
+   `min-width: 0` is the usual reason — a flex item defaults to `min-width:
+   auto`, which is what has twice let a long string push a box wider than its
+   container instead of wrapping inside it. */
+.menu-item { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.menu-item-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-item-meta {
+  font-size: 0.9em; color: var(--faint); line-height: 1.35;
+  white-space: normal; overflow-wrap: anywhere;
+  /* Two lines of detail, then stop. A router's model descriptions are a
+     paragraph each, and a menu row a paragraph tall is a menu you scroll
+     rather than read. */
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
+
+/* A catalogue is 431 models on OpenRouter. Both of these exist because of that
+   number: a box to narrow it with, and a bounded height so the menu cannot
+   grow taller than the window it is drawn in. */
+.menu.wide { min-width: 320px; max-width: min(520px, 86vw); }
+/* The footer's 34ch cap is right for a five-word menu and wrong here: in a wide
+   menu it broke "Showing 50 of 120 — type to narrow it." across two lines with
+   one orphaned word, under a rule that then read as a separator to nothing. */
+.menu.wide .menu-note { max-width: none; }
+.menu-list { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; }
+.menu-filter {
+  margin: 2px 2px 4px; padding: 4px 7px; font-size: 1em; font-family: inherit;
+  color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+  border: 1px solid var(--line); border-radius: 4px; min-width: 0;
+}
+.menu-filter:focus { outline: 1px solid var(--vscode-focusBorder); }
+.menu-item.danger { color: var(--bad); }
+
+button.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+button.danger:hover { background: color-mix(in srgb, var(--bad) 12%, transparent); }
+
+/* ------------------------------------------------------ archive + misc */
+
+.rail-foot { padding: 8px 12px; border-top: 1px solid var(--line); }
+.rail-foot button { width: 100%; }
+.rail-foot button.on { color: var(--vscode-foreground); border-color: var(--vscode-focusBorder); }
+.rail-item.archived .nm, .card.archived .title { opacity: 0.55; }
+.card.archived { border-style: dashed; }
+
+.caret {
+  display: inline-block; width: 7px; height: 1em; margin-left: 1px;
+  background: var(--run); vertical-align: text-bottom;
+  animation: blink 1.1s step-end infinite;
+}
+@keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: 0 } }
+@media (prefers-reduced-motion: reduce) { .caret { animation: none } }
+
+details.thinking {
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); padding: 6px 10px; font-size: 0.85em;
+}
+details.thinking summary { cursor: pointer; color: var(--faint); list-style: none; }
+details.thinking summary::before { content: '✻ '; color: var(--violet); }
+details.thinking summary::-webkit-details-marker { display: none; }
+.thinking-body {
+  margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--line);
+  white-space: pre-wrap; color: var(--muted); line-height: 1.5;
+}
+
+/* --- background agents a session spawned ------------------------------------
+   Quiet by default and amber only when something has no completion recorded.
+   `min-width: 0` on the name for the reason every flex row here carries it. */
+.agents {
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  flex: 0 0 auto;
+  max-height: 34%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.agents.warn { background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.agents-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.agents-head::-webkit-details-marker { display: none; }
+.agents-title { font-weight: 600; font-size: 0.86em; }
+.agents-sub { color: var(--faint); font-size: 0.8em; }
+.agents-body { padding: 0 14px 9px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+.agent-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 0.82em;
+  min-width: 0;
+}
+.agent-dot { flex: 0 0 auto; color: var(--muted); }
+.agent-row.running .agent-dot { color: var(--ok); }
+.agent-row.completed .agent-dot { color: var(--ok); }
+.agent-row.orphaned .agent-dot { color: var(--warn); }
+.agent-row.failed .agent-dot, .agent-row.failed .agent-state { color: var(--bad); }
+.agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.agent-state { color: var(--muted); flex: 0 0 auto; }
+.agent-row.orphaned .agent-state { color: var(--warn); }
+.agent-age {
+  color: var(--faint);
+  font-size: 0.94em;
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+.agents-note { color: var(--muted); font-size: 0.78em; margin-top: 5px; }
+.agents-badge {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 5px;
+  font-size: 0.78em;
+  color: var(--muted);
+  min-width: 0;
+}
+.agents-badge.warn { color: var(--warn); }
+.agents-badge > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.agents-badge-sub { flex: 0 0 auto; opacity: 0.85; }
+
+/* --- selecting several cards at once ---------------------------------------
+   The tick box sits in the title row and must never grow with it: `flex: 0 0
+   auto` plus its own click target, because the card body opens the chat and a
+   box that shares the row's flex would be the first thing squeezed away. */
+.pick {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  padding: 0 2px;
+  margin-right: 2px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.95em;
+  line-height: 1;
+}
+.pick:hover { color: var(--vscode-foreground); }
+.pick.on { color: var(--vscode-focusBorder); }
+.selbar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  width: 100%;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  border-radius: var(--radius);
+  border: 1px solid var(--vscode-focusBorder);
+  background: color-mix(in srgb, var(--vscode-focusBorder) 12%, transparent);
+  min-width: 0;
+}
+.selbar-count { font-size: 0.82em; font-weight: 600; }
+.selbar-acts { display: flex; gap: 5px; min-width: 0; }
+/* `flex: 1 1 0` with `min-width: 0`, so three buttons share the row evenly and
+   shrink together instead of the last one being pushed out of a 300px rail. */
+.selbar-acts button { flex: 1 1 0; min-width: 0; min-height: var(--ctl-h-xs); padding: 0 4px; font-size: var(--ctl-fs-sm); }
+
+/* --- a run that ended without handing the work back ------------------------
+   Quieter than .interrupted on purpose: nothing was lost and nothing is broken,
+   the agent simply stopped in a started column. It states a fact and offers the
+   one action, and it is muted rather than alarming because the common cause is
+   an agent that finished the work and forgot the last step. */
+.stalled {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  border: 1px dashed color-mix(in srgb, var(--muted) 45%, transparent);
+  background: color-mix(in srgb, var(--muted) 8%, transparent);
+  min-width: 0;
+}
+/* `min-width` in EM, not 0: with `min-width: 0` the label is the only thing that
+   can shrink, so the button wins the whole row and "Stopped 24m ago" collapses
+   to "S…". A floor here means the row runs out of space instead, and
+   `flex-wrap` above puts the button on its own line — which is the readable
+   outcome in a 300px column. */
+.stalled-head { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 7.5em; }
+.stalled-icon { color: var(--muted); flex: 0 0 auto; }
+.stalled-title {
+  color: var(--muted);
+  font-size: 0.8em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+/* The two answers share the row and shrink together. `min-width: 0` because a
+   300px column is the design constraint here, not the exception. */
+/* `flex: 1 1 auto` + `wrap`, not `0 0 auto`: as a rigid row the two buttons
+   overflowed the card the moment their combined width passed the column's, and
+   "Move anyway" — the escape hatch — was the half that fell off the edge. */
+.stalled-acts { display: flex; gap: 5px; min-width: 0; flex: 1 1 auto; flex-wrap: wrap; }
+.stalled-acts button {
+  min-height: var(--ctl-h-xs);
+  padding: 0 var(--ctl-px-sm);
+  font-size: var(--ctl-fs-sm);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- a merge that has landed but is not committed --------------------------
+   Deliberately louder than the review panel below it: this one describes a
+   change to the USER'S branch that they have not agreed to yet, and it is the
+   reason every Merge button on the board has gone grey.
+
+   The `overflow: hidden` beside every `text-overflow: ellipsis` below is
+   load-bearing twice over: it clips the text, AND it is what zeroes a flex
+   item's automatic minimum size — the thing whose default (`min-width: auto`)
+   put a card title 94px outside its box and a transcript at 0px wide.
+   `min-width: 0` is therefore redundant next to it and is deliberately NOT
+   here; measured at 560px with a 200-character branch name, adding it changes
+   nothing. Remove either `overflow: hidden` and `layout.test.mjs` measures
+   1070px and 734px of overflow respectively. */
+.pending-merge {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 9px 14px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 40%;
+  overflow-y: auto;
+}
+.pending-merge.conflicted {
+  border-top-color: color-mix(in srgb, var(--bad) 50%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--bad) 50%, transparent);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+}
+.pending-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+.pending-icon { color: var(--warn); flex: 0 0 auto; }
+.pending-merge.conflicted .pending-icon { color: var(--bad); }
+.pending-title {
+  font-weight: 600;
+  font-size: 0.86em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pending-sub { color: var(--muted); font-size: 0.8em; }
+.pending-files {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--panel);
+}
+.merge-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  color: var(--vscode-foreground);
+  font-size: 0.82em;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+.merge-file:last-child { border-bottom: none; }
+.merge-file:hover { background: var(--vscode-list-hoverBackground); }
+.merge-file .fp {
+  font-family: var(--vscode-editor-font-family);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.pending-merge .row-actions button[disabled] { opacity: 0.5; cursor: default; }
+
+/* --- review: what the agent changed, and how to get it back ---------------- */
+
+.review {
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  flex: 0 0 auto;
+  max-height: 46%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.review-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.review-head::-webkit-details-marker { display: none; }
+.review-title { font-weight: 600; font-size: 0.86em; }
+.review-sub { color: var(--faint); font-size: 0.8em; }
+.review-body {
+  padding: 0 14px 10px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.review-meta {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.78em;
+  color: var(--muted);
+}
+.review-files {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.review-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  color: var(--vscode-foreground);
+  font-size: 0.82em;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+.review-file:last-child { border-bottom: none; }
+.review-file:hover { background: var(--vscode-list-hoverBackground); }
+.review-file .fp {
+  font-family: var(--vscode-editor-font-family);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+/* The status letter carries the meaning, so it gets the colour. */
+.st {
+  width: 1.1em;
+  text-align: center;
+  font-family: var(--vscode-editor-font-family);
+  font-weight: 700;
+  font-size: 0.92em;
+  flex: 0 0 auto;
+}
+.st-A, .st-\? { color: var(--ok); }
+.st-M { color: var(--warn); }
+.st-D { color: var(--bad); }
+.st-R { color: var(--violet); }
+.review-file.uncommitted .fp { font-style: italic; }
+.review-commit {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.78em;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.review button[disabled] { opacity: 0.45; cursor: default; }
+
+/* --- how to test: the agent's own instructions, made clickable ------------- */
+
+.testplan {
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--ok) 7%, var(--panel));
+  flex: 0 0 auto;
+  max-height: 40%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.testplan-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.testplan-head::-webkit-details-marker { display: none; }
+.testplan-title { font-weight: 600; font-size: 0.86em; }
+.testplan-body {
+  padding: 0 14px 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.testplan-summary { font-size: 0.88em; line-height: 1.5; }
+.testplan-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.84em;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.testplan-links { display: flex; gap: 6px; flex-wrap: wrap; }
+.testlink {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--vscode-editor-background);
+  color: var(--vscode-foreground);
+  font-size: var(--ctl-fs-sm);
+  cursor: pointer;
+  max-width: 100%;
+  min-width: 0;
+}
+.testlink:hover { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground); }
+.testlink-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.testlink.kind-command .testlink-label { font-family: var(--vscode-editor-font-family); }
+.testlink.kind-command { border-color: color-mix(in srgb, var(--run) 45%, var(--line)); }
+.testlink.kind-url { border-color: color-mix(in srgb, var(--violet) 45%, var(--line)); }
+
+
+/* --- interaction: notices, the prompt queue, slash commands ---------------- */
+
+.notice {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 10px; margin: 2px 0;
+  border-radius: var(--radius);
+  border-left: 3px solid var(--run);
+  background: color-mix(in srgb, var(--run) 10%, transparent);
+  font-size: 0.86em; line-height: 1.5;
+}
+.notice.blocked { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+
+.queued {
+  border: 1px dashed var(--line); border-radius: var(--radius);
+  padding: 8px 10px; margin: 6px 0; opacity: 0.85;
+}
+.queued-head { display: flex; align-items: center; gap: 8px; font-size: 0.78em; color: var(--faint); margin-bottom: 6px; }
+.queued-item {
+  font-size: 0.86em; line-height: 1.45; padding: 4px 0;
+  border-top: 1px solid var(--line);
+}
+.queued-item:first-of-type { border-top: none; }
+
+/* A run the editor killed on its way out. Deliberately quieter than an error
+   badge and louder than nothing: the work is not lost, but it did not finish,
+   and only the user can decide whether to pick it up. */
+.interrupted {
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  padding: 8px 10px; margin: 6px 0;
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+.interrupted-head { display: flex; align-items: center; gap: 6px; }
+.interrupted-icon { color: var(--warn); }
+.interrupted-title {
+  font-size: 0.8em; font-weight: 600;
+  color: var(--warn);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.interrupted-body { font-size: 0.84em; line-height: 1.45; color: var(--faint); margin-top: 6px; }
+.interrupted-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.card .interrupted-actions > button { min-height: var(--ctl-h-xs); padding: 0 var(--ctl-px-sm); font-size: var(--ctl-fs-sm); }
+
+.slash-menu {
+  display: flex; flex-direction: column;
+  margin: 0 14px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel); overflow: hidden; max-height: 260px; overflow-y: auto;
+}
+.slash-item {
+  display: flex; align-items: baseline; gap: 10px; width: 100%;
+  padding: 6px 10px; border: none; border-bottom: 1px solid var(--line);
+  background: none; color: var(--vscode-foreground); text-align: left;
+  font-size: 0.84em; cursor: pointer;
+}
+.slash-item:last-of-type { border-bottom: none; }
+.slash-item:hover, .slash-item.on { background: var(--vscode-list-hoverBackground); }
+.slash-item.on { box-shadow: inset 2px 0 0 var(--vscode-focusBorder); }
+.slash-name { font-family: var(--vscode-editor-font-family); font-weight: 600; }
+.slash-desc { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slash-scope { font-size: 0.86em; color: var(--faint); }
+.slash-hint { padding: 5px 10px; font-size: 0.74em; color: var(--faint); border-top: 1px solid var(--line); }
+
+/* --- the composer's dictation mic and its note ------------------------------ */
+
+.mic { font-size: 1.05em; cursor: pointer; }
+/* The input row's three buttons sit beside the textarea, and measured in real
+   Chromium they once came out at 27, 29 and 33px — three heights in one row,
+   bottoms flush, tops ragged. They are `.ctl.ctl-lg.ctl-icon` now: one FIXED
+   height, square, contents centred. Fixed rather than stretched, because
+   `align-self: stretch` would make them grow with a multi-line draft and
+   turn the row into towers. Restated here so the row cannot lose it to a
+   class that went missing in board.js. */
+.composer .attach, .composer .mic, .composer .send {
+  height: var(--ctl-h-lg); width: var(--ctl-h-lg); padding: 0; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+/* Recording: a solid stop glyph on a red mic, pulsing — a live capture that
+   silently ended is shown as such by state, not by this pulse alone. */
+.mic.live {
+  color: #fff; background: var(--vscode-errorForeground, #f14c4c);
+  border-color: transparent; border-radius: 50%;
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+/* Whisper or ffmpeg is missing: still clickable, because it opens the settings
+   page that says how to install them — a button that goes to the fix is not a
+   dead control. */
+.mic.missing { opacity: 0.45; cursor: pointer; }
+.voice-note {
+  margin: 0 14px 8px; font-size: 0.78em; color: var(--warn, #f0ad4e);
+  padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel);
+}
+
+/* --- the composer's @-mention picker ---------------------------------------- */
+
+.mention-menu {
+  display: flex; flex-direction: column;
+  margin: 0 14px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel); overflow: hidden; max-height: 260px; overflow-y: auto;
+}
+.mention-item {
+  display: flex; align-items: baseline; gap: 10px; width: 100%;
+  padding: 6px 10px; border: none; border-bottom: 1px solid var(--line);
+  background: none; color: var(--vscode-foreground); text-align: left;
+  font-family: var(--vscode-editor-font-family); font-size: 0.84em; cursor: pointer;
+}
+.mention-item:last-of-type { border-bottom: none; }
+.mention-item:hover, .mention-item.on { background: var(--vscode-list-hoverBackground); }
+.mention-item.on { box-shadow: inset 2px 0 0 var(--vscode-focusBorder); }
+.mention-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mention-dir { font-size: 0.86em; color: var(--faint); }
+
+/* --- taking the window ----------------------------------------------------- */
+
+.focus-btn {
+  width: var(--ctl-h);
+  padding: 0;
+  font-size: 1.05em;
+  flex: 0 0 auto;
+}
+.focus-btn.on { color: var(--vscode-foreground); border-color: var(--vscode-focusBorder); }
+
+
+/* --- the side bar control: status and a toggle, never a board -------------- */
+
+.control { display: flex; flex-direction: column; gap: 8px; padding: 12px; height: 100%; }
+.control-title { font-size: 0.95em; font-weight: 600; }
+.control-sub { font-size: 0.82em; color: var(--muted); margin-bottom: 4px; }
+.control-btn { width: 100%; }
+.control-list {
+  display: flex; flex-direction: column; margin-top: 6px;
+  border: 1px solid var(--line); border-radius: var(--radius); overflow-y: auto; flex: 1 1 auto;
+}
+.control-item {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 5px 8px; border: none; border-bottom: 1px solid var(--line);
+  background: none; color: var(--vscode-foreground); text-align: left; font-size: 0.82em; cursor: pointer;
+}
+.control-item:last-child { border-bottom: none; }
+.control-item:hover { background: var(--vscode-list-hoverBackground); }
+.control-item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.control-hint { font-size: 0.74em; color: var(--faint); line-height: 1.4; margin-top: auto; }
+
+/* How many approvals are still queued behind the one on screen. */
+.ask-more { font-size: 0.9em; color: var(--faint); margin-top: 4px; }
+
+/* A pinned card sorts to the top of its column, so it says why. */
+.card.pinned { border-left-color: var(--violet); }
+.card.pinned .title::before { content: '\\1F4CC '; }
+
+/* Accepted, waiting for a free agent slot. Deliberately NOT a pulse: there is
+   no process behind it yet. */
+.dot.queued { background: var(--faint); }
+
+/* Why the agent moved the card, in its own words. */
+.phase-note { margin-top: 4px; color: var(--muted); font-size: 0.92em; }
+
+/* How a card's work was divided, or why it was not. A refusal is dimmer than a
+   split — it is the absence of an action, not a failure. */
+.decomp { margin-top: 6px; font-size: 0.78em; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+.decomp.refused { color: var(--faint); }
+.decomp-said { font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ----------------------------------------------------- transcript search */
+
+.search-main { min-width: 0; }
+.search-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 12px 18px 8px; }
+.search-line { display: flex; gap: 8px; }
+.search-line .ts-input { flex: 1; }
+.search-note { margin-top: 6px; font-size: 0.8em; color: var(--faint); }
+
+.search-list { flex: 1; overflow-y: auto; margin-top: 12px; padding-right: 6px;
+  display: flex; flex-direction: column; gap: 9px; }
+.search-idle, .search-empty { padding: 26px 14px; color: var(--faint); font-size: 0.92em;
+  text-align: center; border: 1px dashed var(--line); border-radius: var(--radius); }
+.search-empty { color: var(--muted); }
+.search-empty-sub { margin-top: 5px; font-size: 0.86em; color: var(--faint); }
+.search-meta { font-size: 0.78em; color: var(--faint); font-variant-numeric: tabular-nums; }
+.search-more { margin-left: 8px; font-style: italic; }
+
+.srow {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 8px 12px; cursor: pointer;
+  background: color-mix(in srgb, var(--vscode-foreground) 2%, transparent);
+}
+.srow:hover { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground); }
+.srow-top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.srow-title { font-weight: 600; font-size: 0.95em; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex: 1; min-width: 0; }
+.srow-when { font-size: 0.74em; color: var(--faint); font-variant-numeric: tabular-nums; flex: none; }
+.srow-kind { font-size: 0.7em; color: var(--faint); letter-spacing: 0.04em; }
+.srow-snip { margin-top: 4px; font-size: 0.88em; line-height: 1.45; color: var(--muted);
+  word-break: break-word; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.srow-lead { color: var(--faint); }
+mark.hl {
+  background: color-mix(in srgb, var(--run) 26%, transparent);
+  color: var(--vscode-foreground);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* The transcript row a search hit jumped to: a ring that fades out over two
+   seconds. A box-shadow ring changes no layout — the row it wraps is a prompt
+   or an answer block of its own height — so the flash cannot push anything. */
+.hit-jump { animation: hitflash 2s ease-out; border-radius: 6px; }
+@keyframes hitflash {
+  0% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--run) 75%, transparent); }
+  100% { box-shadow: 0 0 0 2px transparent; }
+}

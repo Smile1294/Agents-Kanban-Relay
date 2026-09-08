@@ -1,14 +1,24 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html lang="en" data-layout="board">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Remote board</title>
-<meta name="color-scheme" content="light dark">
-<link rel="stylesheet" href="board.css">
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; connect-src 'self'; media-src 'self' blob:">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark">
+<title>Agents Kanban — Remote board</title>
+<!-- theme.css FIRST: board.css takes every colour from --vscode-* variables,
+     which VS Code sets inline on <html> and nobody else does. Without this the
+     board paints white. -->
+<link rel="stylesheet" href="media/theme.css">
+<link rel="stylesheet" href="media/board.css">
+<link rel="stylesheet" href="bridge.css">
 </head>
 <body>
-<main id="root" aria-live="polite"></main>
-<script src="board.js"></script>
+<div id="root"></div>
+<!-- bridge.js FIRST: board.js calls acquireVsCodeApi() the moment it loads,
+     so the bridge must define it before board.js runs — and board.js needs
+     #root to exist, which is why both scripts sit in the body. -->
+<script src="bridge.js"></script>
+<script src="media/board.js"></script>
 </body>
 </html>

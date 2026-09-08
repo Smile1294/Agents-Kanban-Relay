@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/handler.test.mjs && node tests/worker.test.mjs && node tests/server.test.mjs && node tests/viewer.test.mjs && node tests/contract.test.mjs && node --check functions/board.mjs && node --check functions/board-core.mjs && node --check server.js && node --check worker.js && node --check public/board.js"
+    "test": "node tests/handler.test.mjs && node tests/worker.test.mjs && node tests/server.test.mjs && node tests/contract.test.mjs && node tests/media-sync.test.mjs && node tests/bridge.test.mjs && node --check functions/board.mjs && node --check functions/board-core.mjs && node --check server.js && node --check worker.js && node --check public/bridge.js && node --check public/media/board.js"
   },
   "dependencies": {
     "@netlify/blobs": "^11.0.3"

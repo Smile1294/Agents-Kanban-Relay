@@ -2,11 +2,11 @@
  *
  * remote-contract.json at the repo root is carried VERBATIM in the extension
  * repo (Agents-Kanban, a sibling of this one), and the extension's verify gate
- * (`scripts/check-contract.mjs` over there) compares the two copies and
- * checks the extension's own duplicated constants — KEY_OK in relay.ts,
- * NONCE_OK and CMD_TEXT_MAX in commands.ts, the /board path in pusher.ts —
- * against the file. A rule that changed on one side without the file goes red
- * on the other side's gate.
+ * (`scripts/check-contract.mjs` over there) compares the two copies and checks
+ * the extension's own duplicated constants — NONCE_OK and TYPE_OK in
+ * messages.ts, MSG_MAX_BYTES too, and FN_PATH in pusher.ts — against the file.
+ * A rule that changed on one side without the file goes red on the other
+ * side's gate.
  *
  * This test checks the RELAY side of the same file: board-core's constants
  * (the file they are enforced by), and the fnPath route each host serves.
@@ -16,7 +16,9 @@
 import { promises as fs } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import * as path from 'node:path'
-import { ID_OK, KEY_OK, NONCE_OK, SETTING_OK, THINKING_OK, CMD_MAX, CMD_TEXT_MAX } from '../functions/board-core.mjs'
+import {
+  ID_OK, NONCE_OK, TYPE_OK, MSG_MAX, MSG_MAX_BYTES, FRAME_MAX_BYTES, EVENTS_MAX, FN_PATH,
+} from '../functions/board-core.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const CONTRACT = JSON.parse(await fs.readFile(path.join(HERE, '..', 'remote-contract.json'), 'utf8'))
@@ -24,18 +26,19 @@ const CONTRACT = JSON.parse(await fs.readFile(path.join(HERE, '..', 'remote-cont
 let fails = 0
 const ok = (c, m) => { if (!c) { console.error('FAIL:', m); fails++ } else console.log('ok:', m) }
 
-ok(CONTRACT.version === 1, 'the contract has a version, so a future one is not read as this one')
+ok(CONTRACT.version === 2, 'the contract is v2 — this is the board-webview contract, not v1')
 ok(typeof CONTRACT.payload === 'string' && CONTRACT.payload.length > 200,
   'the payload paragraph says what the API is, in words a human can check')
 
 // board-core is the relay's copy of every rule in the contract.
 ok(ID_OK.source === CONTRACT.idOk, 'idOk is ID_OK — the 24-hex board-address rule')
-ok(KEY_OK.source === CONTRACT.keyOk, 'keyOk is KEY_OK — the session-key rule')
 ok(NONCE_OK.source === CONTRACT.nonceOk, 'nonceOk is NONCE_OK — the ack-handle rule')
-ok(SETTING_OK.source === CONTRACT.settingOk, 'settingOk is SETTING_OK — the model/effort id rule')
-ok(THINKING_OK.source === CONTRACT.thinkingOk, 'thinkingOk is THINKING_OK — the thinking mode rule')
-ok(CMD_MAX === CONTRACT.cmdMax, 'cmdMax is CMD_MAX — the queue bound')
-ok(CMD_TEXT_MAX === CONTRACT.cmdTextMax, 'cmdTextMax is CMD_TEXT_MAX — the per-command text cap')
+ok(TYPE_OK.source === CONTRACT.typeOk, 'typeOk is TYPE_OK — the message-type rule')
+ok(MSG_MAX === CONTRACT.msgMax, 'msgMax is MSG_MAX — the queue bound')
+ok(MSG_MAX_BYTES === CONTRACT.msgMaxBytes, 'msgMaxBytes is MSG_MAX_BYTES — the per-message JSON cap')
+ok(FRAME_MAX_BYTES === CONTRACT.frameMaxBytes, 'frameMaxBytes is FRAME_MAX_BYTES — the per-frame JSON cap')
+ok(EVENTS_MAX === CONTRACT.eventsMax, 'eventsMax is EVENTS_MAX — the event-ring bound')
+ok(FN_PATH === CONTRACT.fnPath, 'fnPath is FN_PATH — the one API path every host serves')
 
 // The route path: fnPath is what the extension pushes to and the page fetches.
 const worker = await fs.readFile(path.join(HERE, '..', 'worker.js'), 'utf8')
@@ -52,4 +55,4 @@ if (fails) {
   console.error(`\n${fails} contract failure(s)`)
   process.exit(1)
 }
-console.log("\ncontract: this copy of remote-contract.json is what board-core enforces")
+console.log('\ncontract: this copy of remote-contract.json is what board-core enforces')

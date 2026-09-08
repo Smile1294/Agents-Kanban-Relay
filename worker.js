@@ -7,8 +7,12 @@
  * All behaviour lives in functions/board-core.mjs; this file is a store
  * adapter and a transport, nothing more. Same rules as the other hosts: no
  * stored secret, the board address is the id derived from the pairing code,
- * and commands are only QUEUED here — whether they run is the extension's
+ * and messages are only QUEUED here — whether they run is the extension's
  * decision.
+ *
+ * The Worker cannot hold a request open, so `wait` is accepted and ignored
+ * (contract v2: honoured only by the plain Node host); no answer carries
+ * `longPoll`.
  */
 import { handle } from './functions/board-core.mjs'
 
@@ -50,12 +54,17 @@ export default {
         body = undefined
       }
     }
+    const q = url.searchParams
+    const since = q.get('since')
+    const wait = q.get('wait')
     const out = await handle({
       method: request.method,
-      boardId: key || url.searchParams.get('id') || '',
+      boardId: key || q.get('id') || '',
       key,
-      tailKey: url.searchParams.get('tail') || undefined,
-      cmds: url.searchParams.get('cmds') !== null,
+      since: since === null ? undefined : Number(since),
+      wait: wait === null ? undefined : Number(wait),
+      models: q.get('models') !== null,
+      msgs: q.get('msgs') !== null,
       body,
     }, kvStore(env))
     return new Response(JSON.stringify(out.json), {
