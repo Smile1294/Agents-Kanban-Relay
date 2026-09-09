@@ -488,5 +488,32 @@ const runTimers = async (h) => {
   ok(hasToast(h.body, 'Too large'), '…and a too-large toast explains why')
 }
 
+// --- a frame that lands before board.js exists is not lost --------------------
+//
+// The bridge runs first and polls immediately; board.js registers its message
+// listener when its own <script> tag parses. A frame that arrives in between is
+// posted to nobody, and no later poll carries it again — `since` has caught up
+// and the board has not changed. The page then says "Loading sessions…" for as
+// long as the machine is idle. Found by running two real pages against a real
+// relay, where it was intermittent.
+{
+  const h = await boot({
+    id: ID,
+    router: (url) => {
+      if (url.includes('models=1')) return resp(200, { ok: true, mv: 'v1', models: MODELS })
+      return resp(200, { ok: true, seq: 1, at: Date.now(), writes: true, mv: 'v1', frame: chatFrame(), events: [] })
+    },
+  })
+  const before = h.dispatched.filter((d) => d && d.type === 'state').length
+  ok(before >= 1, 'the frame was dispatched once already')
+  // board.js announcing itself — the message it posts on boot.
+  h.win.acquireVsCodeApi().postMessage({ type: 'ready' })
+  const after = h.dispatched.filter((d) => d && d.type === 'state').length
+  ok(after === before + 1, 'a `ready` re-hands the page the board it already has')
+  const last = [...h.dispatched].reverse().find((d) => d && d.type === 'state')
+  ok(Array.isArray(last?.state?.composer?.models),
+    '…complete, with the model catalogue on it — a repeat, never a guess')
+}
+
 console.log(fails ? `\n${fails} failure(s)` : '\nbridge: all ok')
 process.exit(fails ? 1 : 0)

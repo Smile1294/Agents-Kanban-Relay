@@ -102,6 +102,22 @@
 
   function postMessage(msg) {
     if (!id) return true // the gate is up; board.js's boot `ready` is dropped
+    /* BOARD.JS HAS JUST BOOTED AND HOLDS NOTHING.
+     *
+     * The bridge is a separate <script> that runs first and starts polling
+     * immediately; board.js registers its message listener when its own tag
+     * parses. A frame that arrives in between is posted to NOBODY — and no
+     * later poll carries it again, because `since` has caught up and the board
+     * has not changed. The page then says "Loading sessions…" for as long as
+     * nothing happens on the machine, which on an idle board is for ever.
+     *
+     * Found by running two real pages against a real relay: intermittent, and
+     * exactly the kind of race a slow phone loses more often than a laptop.
+     * `lastState` is the composed board this page already has, models and all,
+     * so handing it over again is a repeat and never a guess. */
+    if (msg && msg.type === 'ready' && lastState) {
+      window.postMessage({ type: 'state', state: lastState }, '*')
+    }
     const body = { kind: 'msg', nonce: crypto.randomUUID(), msg, ...(viewer ? { viewer } : {}) }
     if (JSON.stringify(body).length > MSG_MAX_BYTES) {
       toast({ level: 'error', text: 'Too large for the relay (limit 4 MB) — remove an image' })
