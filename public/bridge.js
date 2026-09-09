@@ -45,6 +45,37 @@
 
   let id = savedId()
 
+  /**
+   * WHO THIS PAGE IS — a name for its own frame slot, nothing more.
+   *
+   * Two phones on one board used to share a single frame, so whichever tapped
+   * last decided what both of them saw and the other sat on "Loading this
+   * conversation…" for a conversation that was never going to arrive. The
+   * machine now builds a board per viewer, and this is the name it builds under.
+   *
+   * NOT a credential: the board id is still the only thing that grants access,
+   * and knowing a viewer id gets nobody anything. Kept in localStorage so a
+   * reload is the same viewer — a fresh id per load would burn a slot on every
+   * refresh and evict the phone in somebody's pocket. `crypto.randomUUID` is
+   * available wherever `crypto.subtle` is, which this file already requires.
+   */
+  const VIEWER_KEY = 'agentsKanban.viewer'
+  function viewerId() {
+    try {
+      const kept = localStorage.getItem(VIEWER_KEY)
+      if (kept && /^[A-Za-z0-9._-]{1,64}$/.test(kept)) return kept
+      const made = crypto.randomUUID()
+      localStorage.setItem(VIEWER_KEY, made)
+      return made
+    } catch {
+      // Private mode, or storage denied. A viewer with no id is the SHARED
+      // slot — the behaviour every page had before this existed — rather than
+      // no board at all.
+      return ''
+    }
+  }
+  const viewer = viewerId()
+
   // --- the page's view of the board ------------------------------------------
   let seq = null // the last seq we saw; null = first load (GET without since)
   let at = 0 // the last push timestamp; 0 = no board yet
@@ -71,7 +102,7 @@
 
   function postMessage(msg) {
     if (!id) return true // the gate is up; board.js's boot `ready` is dropped
-    const body = { kind: 'msg', nonce: crypto.randomUUID(), msg }
+    const body = { kind: 'msg', nonce: crypto.randomUUID(), msg, ...(viewer ? { viewer } : {}) }
     if (JSON.stringify(body).length > MSG_MAX_BYTES) {
       toast({ level: 'error', text: 'Too large for the relay (limit 4 MB) — remove an image' })
       return true
@@ -175,6 +206,10 @@
   // --- polling ---------------------------------------------------------------
   function boardUrl() {
     let u = '/board?id=' + encodeURIComponent(id)
+    // Which frame slot to read. Sent on EVERY board GET, including the first:
+    // that first read is also how the relay learns this viewer is here, and a
+    // page that only ever reads sends no message to announce itself.
+    if (viewer) u += '&v=' + encodeURIComponent(viewer)
     if (seq !== null) u += '&since=' + seq
     // `d=1` says this page can apply frame patches. Opt-in, so a relay serving
     // an older page never hands it one; and only once there is something to

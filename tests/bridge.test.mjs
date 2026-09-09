@@ -186,7 +186,14 @@ const postedMsg = (fetched, type) => fetched.filter((f) =>
   }
   const h = await boot({ id: ID, router })
 
-  ok(firstGet.url === '/board?id=' + ID, 'the first GET is a first load — no since cursor yet')
+  ok(firstGet.url.startsWith('/board?id=' + ID) && !firstGet.url.includes('since='),
+    'the first GET is a first load — no since cursor yet')
+  // The viewer id names this page's own frame slot, and the FIRST read is also
+  // how the relay learns the page is here: a page that only reads never sends
+  // a message to announce itself, and a slot nobody pushes to shows a board
+  // frozen at whenever it loaded.
+  ok(/[?&]v=[A-Za-z0-9._-]{1,64}/.test(firstGet.url),
+    'and it names which frame slot this page reads')
   ok(h.fetched.some((f) => f.method === 'GET' && f.url.includes('models=1')),
     'the first frame triggers a ?models=1 fetch before dispatch')
 

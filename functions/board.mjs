@@ -46,6 +46,9 @@ export default async (req) => {
     // `d=1` — the caller can apply frame patches. Opt-in, so a page built
     // against contract v2 is never handed one.
     deltas: q.get('d') === '1',
+    // Which frame slot this page reads. Absent = the shared one, which is what a
+    // contract-v3 page sends and what a page that has just paired reads.
+    viewer: q.get('v') || '',
     body,
   }, store)
   return json(out.status, out.json)

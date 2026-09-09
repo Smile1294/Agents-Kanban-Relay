@@ -1,4 +1,4 @@
-# Relay protocol — v3
+# Relay protocol — v4
 
 The relay carries the extension's **own board webview** over an asynchronous
 transport. The extension pushes the frames it would post to that webview; the
@@ -14,16 +14,18 @@ half of it.
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "payload": "…",
   "idOk": "^[0-9a-f]{24}$",
   "nonceOk": "^[A-Za-z0-9._-]{1,64}$",
+  "viewerOk": "^[A-Za-z0-9._-]{1,64}$",
   "typeOk": "^[A-Za-z][A-Za-z0-9._-]{0,39}$",
   "msgMax": 40,
   "msgMaxBytes": 4000000,
   "frameMaxBytes": 4000000,
   "eventsMax": 50,
   "deltasMax": 40,
+  "viewersMax": 4,
   "fnPath": "/board"
 }
 ```
@@ -33,40 +35,79 @@ first 24 hex chars of the sha-256 of its pairing code; possession of the id is
 read **and** write (writes travel with the id as `x-rc-key`). The constants in
 `remote-contract.json` are enforced in `functions/board-core.mjs` as `ID_OK`,
 `NONCE_OK`, `TYPE_OK`, `MSG_MAX`, `MSG_MAX_BYTES`, `FRAME_MAX_BYTES`,
-`EVENTS_MAX` and `FN_PATH`.
+`EVENTS_MAX`, `VIEWER_OK`, `VIEWERS_MAX` and `FN_PATH`.
+
+## A frame slot per viewer (new in v4)
+
+A board is one board; the **conversation open on it is not**. Two phones used to
+share a single frame, so whichever tapped last decided what both of them saw and
+the other sat on "Loading this conversation…" for a conversation that was never
+going to arrive.
+
+So the relay keeps a frame — and the patch ring behind it — **per viewer**. A
+viewer id is a name for a slot and nothing more: it is **not a credential**, the
+board id is still the only thing that grants access, and knowing one gets nobody
+anything. The page makes one and keeps it in `localStorage`, so a reload is the
+same viewer rather than a fresh slot on every refresh.
+
+Three rules make it safe to roll out:
+
+- An **absent** viewer is the SHARED slot — what a v3 page reads and a v3
+  extension writes. Nothing breaks by being old.
+- A viewer with **no slot of its own yet** falls back to the shared one on read,
+  so a page that has just paired sees the board immediately rather than a
+  cadence from now. It never gets patches that way: a fallback read is not a
+  chain it has been following.
+- Slots are **bounded** (`viewersMax`), evicting the least recently seen. Each
+  slot is a whole board, and a page that opens once and never comes back must
+  not cost the relay one for ever.
+
+A board GET carrying `v` is also how the relay learns that viewer is here — a
+page that only reads never sends a message — and `?msgs=1` answers `viewers[]`,
+most recently seen first, so the pushing machine knows who to build a board for.
 
 ## Storage (per board id, in the injected store)
 
 | blob | content |
 |---|---|
-| `s:<id>` | the clock: `{ seq, at, writes, mv, viewerAt, frameSeq }`. `seq` is a monotonic counter bumped by every frame-with-state and every event. Read it FIRST on every GET — it is small. |
-| `f:<id>` | the latest frame: `{ seq, frame }`, `frame` = `{ type:'state', state }` — as pushed, or COMPOSED from the patches since (the extension has already removed `state.composer.models`). Always a complete board. |
-| `d:<id>` | a ring of frame patches `[{ seq, base, patch }]`, at most `deltasMax`, oldest dropped, cleared by any whole state. |
+| `s:<id>` | the clock: `{ seq, at, writes, mv, viewerAt, frameSeq, viewers }`. `viewers` is `{ [viewer]: lastSeenMs }`, bounded to `viewersMax`. `seq` is a monotonic counter bumped by every frame-with-state and every event. Read it FIRST on every GET — it is small. |
+| `f:<id>[:<viewer>]` | the latest frame FOR THAT VIEWER (no suffix = the shared slot): `{ seq, frame }`, `frame` = `{ type:'state', state }` — as pushed, or COMPOSED from the patches since (the extension has already removed `state.composer.models`). Always a complete board. |
+| `d:<id>[:<viewer>]` | that viewer's ring of frame patches `[{ seq, base, patch }]`, at most `deltasMax`, oldest dropped, cleared by any whole state. |
 | `m:<id>` | the model catalogue: `{ mv, models }`. |
 | `e:<id>` | a ring of host→page events `[{ seq, msg }]`, at most `eventsMax`, oldest dropped. |
-| `q:<id>` | the queue of page→host messages `[{ nonce, at, msg }]`, at most `msgMax`, FIFO. |
+| `q:<id>` | the queue of page→host messages `[{ nonce, at, msg, viewer? }]`, at most `msgMax`, FIFO. `viewer` says who asked, so a `select` from one phone does not move the other one's board. |
 
 ## POST kinds
 
-- `{ kind:'frame', at, writes, mv, state?, patch?, models? }` — if `state`
-  present: store `f:` with `seq+1`, set `frameSeq`, and DELETE `d:` (every
-  retained patch describes a chain that no longer leads anywhere). If `patch`
-  present instead: compose it onto `f:` and store the result the same way, and
-  append `{ seq, base, patch }` to `d:`. If `models` present: store `m:` =
-  `{ mv, models }`. Always update `at`, `writes` (boolean), `mv` (string, may be
-  `''`). Refuse a body whose JSON text exceeds `frameMaxBytes` with 413. Answer
-  `{ ok:true, patches:true, frameSeq, mv, viewerAt, msgs:[...pending] }` — the
-  pending messages so a busy board picks them up on its own pushes, `frameSeq`
-  so the pusher knows the base for its next patch, and `patches:true` so it
-  learns this relay understands them at all.
+- `{ kind:'frame', at, writes, mv, viewer?, state?, patch?, models? }` —
+  `viewer` names the slot written; absent is the shared one. If `state`
+  present: store `f:<id>[:<viewer>]` with `seq+1` and DELETE that viewer's `d:`
+  (every retained patch describes a chain that no longer leads anywhere). If
+  `patch` present instead: compose it onto THAT SLOT and store the result the
+  same way, and append `{ seq, base, patch }` to that viewer's `d:`. The base a
+  patch must name is the slot's own seq, not the board's last write — another
+  page pushing in between advances the clock and must not invalidate this one's
+  patch, and a patch placed against another slot's number would splice one
+  conversation into another. If `models` present: store `m:` = `{ mv, models }`.
+  Always update `at`, `writes` (boolean), `mv` (string, may be `''`). Refuse a
+  body whose JSON text exceeds `frameMaxBytes` with 413. Answer
+  `{ ok:true, patches:true, viewers:true, frameSeq, mv, viewerAt, msgs:[...pending] }`
+  — the pending messages so a busy board picks them up on its own pushes,
+  `frameSeq` (THAT slot's) so the pusher knows the base for its next patch,
+  `patches:true` so it learns this relay understands them at all, and
+  `viewers:true` so it learns this relay keeps a slot per viewer. Neither is
+  ever assumed: a v3 relay handed `viewer` ignores it and every page silently
+  shares one frame again.
 - `{ kind:'event', events:[msg, ...] }` — each `msg` is an object whose `type`
   matches `typeOk`; append each with `seq+1`; keep at most `eventsMax`. Answer
   `{ ok:true, seq }`.
-- `{ kind:'msg', nonce, msg }` — `nonce` matches `nonceOk`; `msg` is an object;
-  `msg.type` matches `typeOk`; `JSON.stringify(body).length <= msgMaxBytes`
-  (413 otherwise); the same nonce already queued → `{ ok:true }` (a retry, not
-  a duplicate); queue full → 429; else push `{ nonce, at: now, msg }`. Answer
-  `{ ok:true }`.
+- `{ kind:'msg', nonce, viewer?, msg }` — `nonce` matches `nonceOk`; `msg` is
+  an object; `msg.type` matches `typeOk`; `JSON.stringify(body).length <=
+  msgMaxBytes` (413 otherwise); the same nonce already queued → `{ ok:true }`
+  (a retry, not a duplicate); queue full → 429; else push
+  `{ nonce, at: now, msg, viewer? }`. A `viewer` that does not match `viewerOk`
+  is dropped, never refused — an old page has none and must keep working.
+  Answer `{ ok:true }`.
 - `{ kind:'ack', nonces[] }` — remove those nonces (each must match `nonceOk`).
   Acking is the only way a message leaves the queue; delivery is at-least-once.
 - Any other `kind` — including the OLD `update` and `command` — → 400 with
@@ -77,21 +118,30 @@ never the relay's. The relay only holds them.
 
 ## GET
 
+- `&v=<viewer>` on any board GET names the slot to read (absent = the shared
+  one), and REGISTERS that viewer: a first load records it outright, a later
+  poll on the same 20 s throttle as `viewerAt`. Registering on the read is what
+  makes a page that only reads visible to the machine at all.
 - `?id=X` (no `since`) → `{ ok, seq, at, writes, mv, frame (or null), events: [] }`;
-  404 `{ ok:false, error }` when `s:` does not exist yet.
+  404 `{ ok:false, error }` when `s:` does not exist yet. `frame` is that
+  viewer's slot, or the shared one when it has none yet.
 - `?id=X&since=N` → read `s:`; if `seq === N` → `{ ok, seq, at, writes, mv,
   events: [] }` WITHOUT reading the frame blob (the cheap poll). Otherwise
-  include `frame` only if `frameSeq > N`, and `events` with `seq > N`; if `N`
-  is older than the oldest retained event, return everything retained and add
-  `gap: true`. A GET with `since` counts as viewer presence: update `viewerAt`
-  in `s:`, but at most once per 20 s.
-- `&d=1` says the caller can apply frame patches. Then, when `frameSeq > N`,
-  `deltas` (the patches from `d:` with `seq > N`, oldest first) is returned
-  INSTEAD of `frame` — but only when the chain reaches the caller's cursor,
-  which is `ring[start].base <= N` for the first entry newer than `N`: that
-  patch's base frame is one the caller has already seen, and the entries after
-  it are chained to it. Otherwise the whole `frame` goes, as it always did.
-  Never on a first load (no `since`): there is nothing to apply a patch to.
+  include `frame` only if THAT VIEWER'S slot is newer than `N`, and `events`
+  with `seq > N`; if `N` is older than the oldest retained event, return
+  everything retained and add `gap: true`. The slot's own seq decides, never
+  the board's last write: another page pushing advances `seq`, and answering
+  that as "your board changed" would hand this one somebody else's
+  conversation.
+- `&d=1` says the caller can apply frame patches. Then, when the slot is newer
+  than `N`, `deltas` (the patches from that viewer's `d:` with `seq > N`,
+  oldest first) is returned INSTEAD of `frame` — but only when the chain
+  reaches the caller's cursor, which is `ring[start].base <= N` for the first
+  entry newer than `N`: that patch's base frame is one the caller has already
+  seen, and the entries after it are chained to it. Otherwise the whole `frame`
+  goes, as it always did. Never on a first load (no `since`): there is nothing
+  to apply a patch to. And never from a FALLBACK read of the shared slot — that
+  is not a chain this caller has been following.
 
 ## Frame patches
 
@@ -150,7 +200,10 @@ Four things are load-bearing:
   happens on a click rather than on a token is how a format grows a corner
   nobody tests.
 - `?id=X&models=1` → `{ ok, mv, models }` (404 when none).
-- `?id=X&msgs=1[&wait=<secs>]` → `{ ok, msgs, viewerAt }`. With `wait`, a host
+- `?id=X&msgs=1[&wait=<secs>]` → `{ ok, msgs, viewerAt, viewers }`. `viewers`
+  is the frame slots the board is keeping, most recently seen first: the
+  pushing machine reads it to know who to build a board for, because a page
+  that only reads never sends a message to announce itself. With `wait`, a host
   that can hold a request holds it until the queue is non-empty or the timeout,
   so a pushing machine learns of a queued message AS IT LANDS rather than at its
   next tick. Measured end to end, tap on the phone to the board moving: that

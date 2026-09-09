@@ -473,6 +473,99 @@ const patchBody = (base, over = {}) => ({
     'a fast board answers while a slow one is still writing — the lock is per board')
 }
 
+// --- a frame slot per viewer -------------------------------------------------
+//
+// A board is one board; the conversation open on it is not. Two phones used to
+// share one frame slot, so whichever tapped last decided what both of them saw
+// and the other sat on "Loading this conversation…" for a conversation that was
+// never going to arrive.
+
+const V1 = 'viewer-one'
+const V2 = 'viewer-two'
+const getFor = (store, over = {}) => handle({ method: 'GET', boardId: ID, ...over }, store)
+const chatFor = (key) => ({ ready: true, mode: 'chat', selectedKey: key, cards: [], transcript: [] })
+
+{
+  const store = fakeStore()
+  await post(store, { body: frameBody({ viewer: V1, state: chatFor('alpha') }) })
+  await post(store, { body: frameBody({ viewer: V2, state: chatFor('beta') }) })
+
+  const one = await getFor(store, { viewer: V1 })
+  const two = await getFor(store, { viewer: V2 })
+  ok(one.json.frame.state.selectedKey === 'alpha',
+    'each viewer reads its OWN frame — one page is on alpha')
+  ok(two.json.frame.state.selectedKey === 'beta',
+    '…and the other on beta, at the same time, on the same board')
+
+  const anon = await getFor(store, {})
+  ok(anon.json.frame === null,
+    'a page with no viewer id reads the SHARED slot, which nobody has written')
+
+  await post(store, { body: frameBody({ state: chatFor('shared') }) })
+  const nowAnon = await getFor(store, {})
+  ok(nowAnon.json.frame.state.selectedKey === 'shared',
+    '…and gets it once something writes there — a v3 extension keeps working')
+  const three = await getFor(store, { viewer: 'viewer-three' })
+  ok(three.json.frame.state.selectedKey === 'shared',
+    'a viewer nobody has pushed to yet FALLS BACK to the shared slot rather than seeing nothing')
+}
+
+{
+  // A patch is placed against the slot's own seq, not the board's last write.
+  const store = fakeStore()
+  const first = await post(store, { body: frameBody({ viewer: V1, state: chat(10) }) })
+  const base = first.json.frameSeq
+  ok(first.json.viewers === true,
+    'the relay SAYS it keeps a slot per viewer — a pusher never assumes it')
+  // Another viewer writes in between, which advances the board clock.
+  await post(store, { body: frameBody({ viewer: V2, state: chat(3) }) })
+  const patched = await post(store, {
+    body: {
+      ...patchBody(base, { rows: { from: 10, rows: [{ kind: 'text', text: 'row 10' }] } }),
+      viewer: V1,
+    },
+  })
+  ok(!patched.json.needFrame,
+    "another page's push does not invalidate this one's patch base")
+  const after = await getFor(store, { viewer: V1 })
+  ok(after.json.frame.state.transcript.length === 11,
+    '…and the patch composed onto the right conversation')
+  const other = await getFor(store, { viewer: V2 })
+  ok(other.json.frame.state.transcript.length === 3,
+    'while the other viewer’s board is untouched by it')
+}
+
+{
+  // The slots are BOUNDED: a page that opens once and never returns must not
+  // cost this relay a whole board for ever.
+  const store = fakeStore()
+  for (let i = 0; i < 6; i++) {
+    await post(store, { body: frameBody({ at: 1000 + i, viewer: `v-${i}`, state: chatFor(`s-${i}`) }) })
+  }
+  const oldest = await getFor(store, { viewer: 'v-0' })
+  ok(oldest.json.frame === null,
+    'the least recently seen slot is evicted — five viewers, four slots, and no shared frame to fall back to')
+  const newest = await getFor(store, { viewer: 'v-5' })
+  ok(newest.json.frame.state.selectedKey === 's-5', 'while the most recent is still there')
+  const msgs = await handle({ method: 'GET', boardId: ID, msgs: true }, store)
+  ok(msgs.json.viewers.length === 4 && msgs.json.viewers[0] === 'v-5',
+    'and the queue read NAMES the surviving slots, most recent first, so the machine knows who to build for')
+}
+
+{
+  // A message says WHO asked, so a select from one phone does not move the
+  // other one's board.
+  const store = fakeStore()
+  await post(store, { body: frameBody() })
+  await postMsg(store, 'n1', { type: 'select', id: 'alpha' }, { viewer: V1 })
+  const msgs = await handle({ method: 'GET', boardId: ID, msgs: true }, store)
+  ok(msgs.json.msgs[0].viewer === V1, 'a queued message carries the viewer that sent it')
+  await postMsg(store, 'n2', { type: 'select', id: 'beta' })
+  const both = await handle({ method: 'GET', boardId: ID, msgs: true }, store)
+  ok(both.json.msgs[1].viewer === undefined,
+    '…and one from a page with no id carries none, rather than being refused')
+}
+
 // --- the constants agree with the contract -----------------------------------
 
 {

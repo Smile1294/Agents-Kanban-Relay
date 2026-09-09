@@ -37,6 +37,24 @@ export const ID_OK = /^[0-9a-f]{24}$/i
 /** A message's nonce: browser-generated (a UUID), but validated like every
  *  other string an outsider sends — it is the ack handle, nothing more. */
 export const NONCE_OK = /^[A-Za-z0-9._-]{1,64}$/
+
+/**
+ * A viewer id: one page, on one device, for as long as its browser keeps it.
+ *
+ * Not a credential and not a secret — the board id is still the only thing that
+ * grants access, and a viewer id is only a NAME for a frame slot. It is checked
+ * for shape because it becomes part of a store key.
+ */
+export const VIEWER_OK = /^[A-Za-z0-9._-]{1,64}$/
+
+/**
+ * How many viewer frame slots a board keeps, past the shared one.
+ *
+ * Bounded because each is a whole board: a page that opens once and never comes
+ * back must not cost this relay a frame for ever. The least recently seen is
+ * evicted, which is exactly the page nobody is looking at.
+ */
+export const VIEWERS_MAX = 4
 /** A webview message's `type`. Board messages and the two bridge messages
  *  (`remote.dialog`, `voiceAudio`) are all one leading letter then a short
  *  dotted path — never an arbitrary string the host would have to interpret. */
@@ -106,8 +124,21 @@ function serialise(id, fn) {
 /** The storage blobs, keyed by board id. Small clock first — every GET reads
  *  it before anything else, so a cheap poll costs one read. */
 const clockBlob = (id) => `s:${id}`
-const frameBlob = (id) => `f:${id}`
-const deltasBlob = (id) => `d:${id}`
+/**
+ * The frame, and the patch ring behind it, PER VIEWER.
+ *
+ * A board is one board; the conversation open on it is not. Two phones on two
+ * chats used to share one frame slot, so whichever tapped last decided what
+ * both of them saw — the second was left waiting for a conversation that was
+ * never going to arrive.
+ *
+ * An ABSENT viewer is the shared slot, and that is what a contract-v3 caller
+ * writes and reads. It is also the FALLBACK for a viewer that has never been
+ * pushed one: a page that has just paired sees the board immediately instead of
+ * waiting a cadence for a slot with its name on it.
+ */
+const frameBlob = (id, viewer) => (viewer ? `f:${id}:${viewer}` : `f:${id}`)
+const deltasBlob = (id, viewer) => (viewer ? `d:${id}:${viewer}` : `d:${id}`)
 const modelsBlob = (id) => `m:${id}`
 const eventsBlob = (id) => `e:${id}`
 const queueBlob = (id) => `q:${id}`
@@ -117,12 +148,43 @@ export const ok = (json) => ({ status: 200, json })
 export const fail = (status, error) => ({ status, json: { ok: false, error } })
 
 /** A fresh clock — the state of a board nothing has been pushed to yet. */
-const emptyClock = () => ({ seq: 0, at: 0, writes: false, mv: '', viewerAt: 0, frameSeq: 0 })
+const emptyClock = () => ({ seq: 0, at: 0, writes: false, mv: '', viewerAt: 0, frameSeq: 0, viewers: {} })
+
+/**
+ * Remember that a viewer is here, and answer which slots survive.
+ *
+ * `clock.viewers` is `{ [viewer]: lastSeenMs }`, bounded to VIEWERS_MAX by
+ * evicting the least recently seen. The evicted names are returned so the
+ * caller can delete their blobs — a slot nobody can reach is just a leak.
+ */
+function touchViewer(clock, viewer, now) {
+  if (!clock.viewers || typeof clock.viewers !== 'object') clock.viewers = {}
+  clock.viewers[viewer] = now
+  const names = Object.keys(clock.viewers)
+  if (names.length <= VIEWERS_MAX) return []
+  names.sort((a, b) => (clock.viewers[b] || 0) - (clock.viewers[a] || 0))
+  const dropped = names.slice(VIEWERS_MAX)
+  for (const d of dropped) delete clock.viewers[d]
+  return dropped
+}
 
 /** The patch ring — `[{ seq, base, patch }]`, oldest first. Missing = empty. */
-async function readDeltas(store, id) {
-  const parsed = await readJson(store, deltasBlob(id))
+async function readDeltas(store, id, viewer) {
+  const parsed = await readJson(store, deltasBlob(id, viewer))
   return Array.isArray(parsed) ? parsed : []
+}
+
+/** The stored frame for a viewer, falling back to the shared slot — see
+ *  `frameBlob`. Answers `{ seq, frame, own }`: `own` says whether the viewer
+ *  has a slot of its own, which is what decides where a patch may be placed. */
+async function readFrameFor(store, id, viewer) {
+  if (viewer) {
+    const mine = await readJson(store, frameBlob(id, viewer))
+    if (mine && mine.frame) return { seq: mine.seq, frame: mine.frame, own: true }
+  }
+  const shared = await readJson(store, frameBlob(id))
+  if (shared && shared.frame) return { seq: shared.seq, frame: shared.frame, own: false }
+  return null
 }
 
 /**
@@ -201,6 +263,13 @@ async function writeQueue(store, id, queue) {
 
 /** How large a JSON body serialises to, guarded — an unstringifiable body is
  *  refused on the shape checks before this is reached, but never throws. */
+/** A viewer id off the wire: the shape check, and nothing else. Anything that
+ *  does not look like one is the SHARED slot, never an error — an old page has
+ *  no viewer id and must keep working. */
+function viewerOf(raw) {
+  return typeof raw === 'string' && VIEWER_OK.test(raw) ? raw : ''
+}
+
 function jsonBytes(body) {
   try {
     return JSON.stringify(body).length
@@ -251,7 +320,7 @@ async function route(req, id, store) {
     if (req.models) return getModels(store, id)
     if (req.msgs) return getMsgs(store, id)
     const since = Number.isFinite(req.since) ? req.since : undefined
-    return getBoard(store, id, since, req.deltas === true)
+    return getBoard(store, id, since, req.deltas === true, viewerOf(req.viewer))
   }
 
   return fail(405, 'only GET and POST are served')
@@ -267,6 +336,9 @@ async function postFrame(store, id, body) {
   if (jsonBytes(body) > FRAME_MAX_BYTES) {
     return fail(413, 'the frame is larger than the relay accepts')
   }
+  // WHICH viewer this frame is for. Absent = the shared slot, which is what a
+  // v3 extension writes and what a page with no id of its own reads.
+  const viewer = viewerOf(body.viewer)
   const writes = body.writes === true
   const mv = typeof body.mv === 'string' ? body.mv : ''
   const at = Number.isFinite(body.at) ? body.at : Date.now()
@@ -281,36 +353,54 @@ async function postFrame(store, id, body) {
   const answer = { ok: true, patches: true, mv, viewerAt: clock.viewerAt }
   let needFrame = false
 
+  // The seq THIS viewer's slot is holding. Read from the blob rather than kept
+  // on the clock, because there is a slot per viewer and one number cannot
+  // describe them all — and a patch placed against another viewer's seq would
+  // splice one conversation into another.
+  const slot = await readJson(store, frameBlob(id, viewer))
+  let slotSeq = slot && slot.frame ? slot.seq : 0
+
   if (hasState) {
     const frame = { type: 'state', state: body.state }
     clock.seq += 1
+    slotSeq = clock.seq
     clock.frameSeq = clock.seq
-    await store.set(frameBlob(id), JSON.stringify({ seq: clock.seq, frame }))
+    await store.set(frameBlob(id, viewer), JSON.stringify({ seq: clock.seq, frame }))
     // A whole state RESETS the ring: every retained patch describes a chain
     // that no longer leads anywhere, and a page holding one of them would
     // splice it into a board it was never built against.
-    await store.delete(deltasBlob(id))
+    await store.delete(deltasBlob(id, viewer))
   } else if (hasPatch) {
-    // A patch is only applied to the frame it names. Anything else — the relay
-    // restarted, another writer got in first, this end lost track — and the
-    // honest answer is "send me a frame", never a best guess.
-    const held = await readJson(store, frameBlob(id))
-    const composed = held && body.patch.base === clock.frameSeq
-      ? composePatch(held.frame, body.patch)
+    // A patch is only applied to the frame it names, in this viewer's OWN slot.
+    // Anything else — the relay restarted, another writer got in first, this
+    // end lost track, or this viewer has no slot yet and is reading the shared
+    // one — and the honest answer is "send me a frame", never a best guess.
+    const composed = slot && slot.frame && body.patch.base === slotSeq
+      ? composePatch(slot.frame, body.patch)
       : null
     if (!composed) {
       needFrame = true
     } else {
       clock.seq += 1
-      const base = clock.frameSeq
+      const base = slotSeq
+      slotSeq = clock.seq
       clock.frameSeq = clock.seq
-      await store.set(frameBlob(id), JSON.stringify({ seq: clock.seq, frame: composed }))
+      await store.set(frameBlob(id, viewer), JSON.stringify({ seq: clock.seq, frame: composed }))
       // The patch is kept as well as composed, so a page that is only a few
       // frames behind can be sent the rows rather than the board.
-      const ring = await readDeltas(store, id)
+      const ring = await readDeltas(store, id, viewer)
       ring.push({ seq: clock.seq, base, patch: body.patch })
       while (ring.length > DELTAS_MAX) ring.shift()
-      await store.set(deltasBlob(id), JSON.stringify(ring))
+      await store.set(deltasBlob(id, viewer), JSON.stringify(ring))
+    }
+  }
+
+  // Pushing to a named slot is what keeps it alive; the eviction is by LAST
+  // SEEN, so a page nobody is pushing to and nobody is polling goes first.
+  if (viewer) {
+    for (const gone of touchViewer(clock, viewer, at)) {
+      await store.delete(frameBlob(id, gone))
+      await store.delete(deltasBlob(id, gone))
     }
   }
 
@@ -323,7 +413,14 @@ async function postFrame(store, id, body) {
   await writeClock(store, id, clock)
 
   answer.viewerAt = clock.viewerAt
-  answer.frameSeq = clock.frameSeq
+  // THIS viewer's slot, not the board's last write: it is the base the pusher
+  // builds its next patch against, and handing it another slot's number is how
+  // one conversation gets spliced into another.
+  answer.frameSeq = slotSeq
+  // How the pusher learns this relay keeps a slot per viewer. Never assumed: a
+  // v3 relay handed `viewer` ignores it and every page would share one frame
+  // again, silently.
+  answer.viewers = true
   if (needFrame) answer.needFrame = true
   answer.msgs = await readQueue(store, id)
   return ok(answer)
@@ -378,7 +475,11 @@ async function postMsg(store, id, body) {
   if (queue.length >= MSG_MAX) {
     return fail(429, 'the message queue is full — wait for the board to catch up')
   }
-  queue.push({ nonce, at: Date.now(), msg })
+  // WHO sent it. Carried so the machine can answer the page that asked rather
+  // than whichever slot happens to be shared — a `select` from one phone must
+  // not move the other one's board.
+  const viewer = viewerOf(body.viewer)
+  queue.push({ nonce, at: Date.now(), msg, ...(viewer ? { viewer } : {}) })
   await writeQueue(store, id, queue)
   return ok({ ok: true })
 }
@@ -406,7 +507,7 @@ async function postAck(store, id, body) {
  *  it is newer than `since`, and events newer than `since` (with `gap` when
  *  the caller is older than the retained ring). A GET with `since` also counts
  *  as viewer presence, throttled to one clock write per 20 s. */
-async function getBoard(store, id, since, wantsDeltas) {
+async function getBoard(store, id, since, wantsDeltas, viewer) {
   const clock = await readClock(store, id)
   if (!clock) return fail(404, 'no board here yet — waiting for the first push from the extension')
 
@@ -416,19 +517,36 @@ async function getBoard(store, id, since, wantsDeltas) {
     // First load: the whole picture — the latest COMPOSED frame, no events
     // (they are new only from the caller's cursor, and there is none yet).
     // Never patches: a caller with no cursor has nothing to apply them to.
-    let frame = null
-    const raw = await store.get(frameBlob(id))
-    if (raw) {
-      const parsed = await readJson(store, frameBlob(id))
-      frame = parsed && parsed.frame ? parsed.frame : null
+    // A viewer with no slot of its own falls back to the shared one, so a page
+    // that has just paired sees the board now rather than a cadence from now.
+    const held = await readFrameFor(store, id, viewer)
+    const answer = ok({ ...base, frame: held ? held.frame : null, events: [] })
+    // A first load is also this viewer ARRIVING. Recorded here so the machine
+    // learns the slot exists from the poll rather than only from a message,
+    // which a page that is only reading would never send.
+    if (viewer) {
+      const now = Date.now()
+      clock.viewerAt = now
+      for (const gone of touchViewer(clock, viewer, now)) {
+        await store.delete(frameBlob(id, gone))
+        await store.delete(deltasBlob(id, gone))
+      }
+      await writeClock(store, id, clock)
     }
-    return ok({ ...base, frame, events: [] })
+    return answer
   }
 
   // Viewer presence, throttled: read, compare, conditional write. A clock
   // write per poll would be a bug on every host.
   if (Date.now() - (clock.viewerAt || 0) >= 20_000) {
-    clock.viewerAt = Date.now()
+    const now = Date.now()
+    clock.viewerAt = now
+    if (viewer) {
+      for (const gone of touchViewer(clock, viewer, now)) {
+        await store.delete(frameBlob(id, gone))
+        await store.delete(deltasBlob(id, gone))
+      }
+    }
     await writeClock(store, id, clock)
   }
 
@@ -451,23 +569,26 @@ async function getBoard(store, id, since, wantsDeltas) {
 
   let frame = null
   let deltas = null
-  if (clock.frameSeq > since) {
+  // THIS viewer's slot decides whether there is anything new to send, not the
+  // board's last write: another page's frame bumps the clock, and answering it
+  // as "your board changed" would hand this one somebody else's conversation.
+  const held = await readFrameFor(store, id, viewer)
+  if (held && held.seq > since) {
     // A caller that says it can apply patches gets them when the chain from
     // its own cursor is complete — `ring[start].base <= since` is the proof:
     // that patch's base frame is one the caller has already seen, and the
     // entries after it are chained. Anything less and it gets the whole frame,
     // which the relay always holds because it composes as it stores.
-    if (wantsDeltas) {
-      const ring = await readDeltas(store, id)
+    // Only from the viewer's OWN ring: a fallback read of the shared slot is
+    // not a chain this caller has been following.
+    if (wantsDeltas && held.own === !!viewer) {
+      const ring = await readDeltas(store, id, held.own ? viewer : '')
       const start = ring.findIndex((d) => d.seq > since)
       if (start >= 0 && ring[start].base <= since) {
         deltas = ring.slice(start).map((d) => d.patch)
       }
     }
-    if (!deltas) {
-      const parsed = await readJson(store, frameBlob(id))
-      frame = parsed && parsed.frame ? parsed.frame : null
-    }
+    if (!deltas) frame = held.frame
   }
 
   return ok({
@@ -488,9 +609,19 @@ async function getModels(store, id) {
   return ok({ ok: true, mv: parsed.mv, models: parsed.models })
 }
 
-/** `?msgs=1` — the pending page→host queue, and when a viewer last looked. */
+/** `?msgs=1` — the pending page→host queue, when a viewer last looked, and the
+ *  viewers the board is keeping a frame slot for. `viewers` is how the machine
+ *  learns WHO to build a board for: a page that is only reading never sends a
+ *  message, and a slot nobody pushes to shows a board frozen at whenever it
+ *  first loaded. */
 async function getMsgs(store, id) {
   const msgs = await readQueue(store, id)
   const clock = await readClock(store, id)
-  return ok({ ok: true, msgs, viewerAt: clock ? clock.viewerAt : 0 })
+  const seen = clock && clock.viewers && typeof clock.viewers === 'object' ? clock.viewers : {}
+  return ok({
+    ok: true,
+    msgs,
+    viewerAt: clock ? clock.viewerAt : 0,
+    viewers: Object.keys(seen).sort((a, b) => (seen[b] || 0) - (seen[a] || 0)),
+  })
 }

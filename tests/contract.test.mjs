@@ -17,7 +17,7 @@ import { promises as fs } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import * as path from 'node:path'
 import {
-  ID_OK, NONCE_OK, TYPE_OK, MSG_MAX, MSG_MAX_BYTES, FRAME_MAX_BYTES, EVENTS_MAX, DELTAS_MAX, FN_PATH,
+  ID_OK, NONCE_OK, TYPE_OK, MSG_MAX, MSG_MAX_BYTES, FRAME_MAX_BYTES, EVENTS_MAX, DELTAS_MAX, FN_PATH, VIEWERS_MAX, VIEWER_OK,
 } from '../functions/board-core.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -26,13 +26,15 @@ const CONTRACT = JSON.parse(await fs.readFile(path.join(HERE, '..', 'remote-cont
 let fails = 0
 const ok = (c, m) => { if (!c) { console.error('FAIL:', m); fails++ } else console.log('ok:', m) }
 
-ok(CONTRACT.version === 3, 'the contract is v3 — the board-webview contract with frame patches')
+ok(CONTRACT.version === 4, 'the contract is v4 — a frame slot per viewer, so two pages can be on two chats')
 ok(typeof CONTRACT.payload === 'string' && CONTRACT.payload.length > 200,
   'the payload paragraph says what the API is, in words a human can check')
 
 // board-core is the relay's copy of every rule in the contract.
 ok(ID_OK.source === CONTRACT.idOk, 'idOk is ID_OK — the 24-hex board-address rule')
 ok(NONCE_OK.source === CONTRACT.nonceOk, 'nonceOk is NONCE_OK — the ack-handle rule')
+ok(VIEWER_OK.source === CONTRACT.viewerOk, 'viewerOk is VIEWER_OK — the frame-slot name rule')
+ok(VIEWERS_MAX === CONTRACT.viewersMax, 'viewersMax is VIEWERS_MAX — how many frame slots a board keeps')
 ok(TYPE_OK.source === CONTRACT.typeOk, 'typeOk is TYPE_OK — the message-type rule')
 ok(MSG_MAX === CONTRACT.msgMax, 'msgMax is MSG_MAX — the queue bound')
 ok(MSG_MAX_BYTES === CONTRACT.msgMaxBytes, 'msgMaxBytes is MSG_MAX_BYTES — the per-message JSON cap')
