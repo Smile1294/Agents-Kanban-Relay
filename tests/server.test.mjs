@@ -164,6 +164,75 @@ const s1 = await startServer(tmp)
   ok(json.longPoll === true && json.seq === 3, '…and it sees the new frame')
 }
 
+// --- the message queue holds open too ----------------------------------------
+//
+// The page has long-polled for FRAMES since v2; the pushing machine polled the
+// message QUEUE on a timer, so a tap sat there for up to a full interval before
+// the machine looked. Measured end to end that was one of two 0-2000 ms waits
+// either side of the work — together ~2 s of a ~2.2 s round trip.
+
+{
+  const BOARD = 'a'.repeat(23) + 'b'
+  await fetch(s1.base + '/board', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-rc-key': BOARD },
+    body: JSON.stringify({ kind: 'frame', at: Date.now(), writes: true, mv: 'v1', state: STATE }),
+  })
+
+  // Nothing queued: the request is HELD, not answered empty straight away.
+  const start = Date.now()
+  const held = fetch(s1.base + `/board?id=${BOARD}&msgs=1&wait=3`)
+  await new Promise((r) => setTimeout(r, 300))
+  const queued = await fetch(s1.base + '/board', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-rc-key': BOARD },
+    body: JSON.stringify({ kind: 'msg', nonce: 'tap-1', msg: { type: 'select', id: 'x' } }),
+  })
+  ok(queued.status === 200, 'the tap is queued while the machine is holding a poll open')
+
+  const res = await held
+  const took = Date.now() - start
+  const json = await res.json()
+  ok(json.msgs && json.msgs.length === 1 && json.msgs[0].nonce === 'tap-1',
+    'the held poll returns the tap')
+  ok(took < 2_000, `…and returns as soon as it lands, not at the timeout (${took}ms)`)
+  ok(json.longPoll === true, '…and says the host holds, so the machine may loop straight back')
+}
+
+{
+  // The lock, which is the way this could go badly wrong. board-core serialises
+  // per board id; a held request that kept that lock would block every write to
+  // the same board for the whole wait — the exact opposite of the point.
+  const BOARD = 'a'.repeat(22) + 'cd'
+  await fetch(s1.base + '/board', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-rc-key': BOARD },
+    body: JSON.stringify({ kind: 'frame', at: Date.now(), writes: true, mv: 'v1', state: STATE }),
+  })
+  const held = fetch(s1.base + `/board?id=${BOARD}&msgs=1&wait=4`)
+  await new Promise((r) => setTimeout(r, 150))
+
+  const t = Date.now()
+  const push = await fetch(s1.base + '/board', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-rc-key': BOARD },
+    body: JSON.stringify({ kind: 'frame', at: Date.now(), writes: true, mv: 'v1', state: { ...STATE, v: 9 } }),
+  })
+  const pushTook = Date.now() - t
+  ok(push.status === 200 && pushTook < 1_000,
+    `a frame push is NOT blocked by a held poll on the same board (${pushTook}ms)`)
+
+  const read = await (await fetch(s1.base + `/board?id=${BOARD}`)).json()
+  ok(read.frame.state.v === 9, '…and it really landed')
+  // Release the held poll so the suite does not wait it out.
+  await fetch(s1.base + '/board', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-rc-key': BOARD },
+    body: JSON.stringify({ kind: 'msg', nonce: 'release', msg: { type: 'ready' } }),
+  })
+  await held
+}
+
 // --- patch frames over real HTTP ---------------------------------------------
 //
 // The 97%-of-a-frame transcript, sent once. Driven end to end here because the

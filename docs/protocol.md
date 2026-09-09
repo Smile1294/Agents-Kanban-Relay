@@ -150,7 +150,15 @@ Four things are load-bearing:
   happens on a click rather than on a token is how a format grows a corner
   nobody tests.
 - `?id=X&models=1` → `{ ok, mv, models }` (404 when none).
-- `?id=X&msgs=1` → `{ ok, msgs, viewerAt }`.
+- `?id=X&msgs=1[&wait=<secs>]` → `{ ok, msgs, viewerAt }`. With `wait`, a host
+  that can hold a request holds it until the queue is non-empty or the timeout,
+  so a pushing machine learns of a queued message AS IT LANDS rather than at its
+  next tick. Measured end to end, tap on the phone to the board moving: that
+  interval was one of two 0–2000 ms waits either side of ~70 ms of actual work,
+  and removing both took the round trip from 370–2729 ms to a ~45 ms median.
+  Every GET answer from such a host carries `longPoll: true`, and a caller must
+  never assume holding without it — a host that answers immediately, looped on,
+  is a busy loop against the relay.
 - `&wait=<secs>` (1..25): only the plain Node host honours it — hold the
   response until `seq` changes or the timeout, via an in-process emitter fired
   on every store mutation; every GET answer from that host carries
@@ -161,9 +169,16 @@ Four things are load-bearing:
 
 | Host | Store | `wait` / `longPoll` |
 |---|---|---|
-| `server.js` (Node) | one JSON file, serialised atomic writes | honours `wait`; every GET carries `longPoll:true` |
+| `server.js` (Node) | one JSON file, serialised atomic writes | honours `wait` on board AND `msgs` polls; every GET carries `longPoll:true` |
 | `functions/board.mjs` (Netlify) | Netlify Blobs (`getStore`, site-wide) | ignores `wait`; no `longPoll` |
 | `worker.js` (Cloudflare) | Workers KV | ignores `wait`; no `longPoll` |
+
+**A held request never holds the lock.** `handle()` serialises per board id, so
+a poll that kept that lock while waiting would block every write to the same
+board for the whole 25 s — the exact opposite of what holding it is for. Both
+holds call `handle()`, let the lock go, and only then wait; `tests/server.test.mjs`
+pushes a frame to a board that has a poll held open on it and asserts the push
+is not delayed.
 
 **Concurrency.** Every branch above is a read-modify-write across `await`
 points — read the clock, bump `seq`, write it back — so `handle()` serialises

@@ -229,7 +229,12 @@ function waitForChange(ms) {
 
 /** Hold a board GET open until `since` advances or the timeout — the one thing
  *  this host does that the others cannot. A first load (no `since`) answers
- *  right away; a 404 waits for the first push. */
+ *  right away; a 404 waits for the first push.
+ *
+ *  The wait happens BETWEEN `handle()` calls and never inside one. board-core
+ *  serialises requests per board id, so a held request that kept that lock
+ *  would block every write to the same board for the whole 25 s — the exact
+ *  opposite of what holding it is for. */
 async function longPoll(req, since, waitSecs) {
   const deadline = Date.now() + waitSecs * 1000
   let out = await handle(req, store)
@@ -238,6 +243,33 @@ async function longPoll(req, since, waitSecs) {
     await waitForChange(deadline - Date.now())
     out = await handle(req, store)
     if (out.status === 200 && out.json.seq > since) return out
+  }
+  return out
+}
+
+/**
+ * Hold a `msgs=1` GET open until the queue has something in it.
+ *
+ * The page has long-polled for FRAMES since v2; the pushing machine polled the
+ * message queue on a timer, so a tap sat in the queue for up to a full poll
+ * interval before the machine even looked. Measured end to end, that was one of
+ * two 0–2000 ms waits either side of the work, and together they were ~2 s of a
+ * ~2.2 s round trip. This half removes one of them.
+ *
+ * Same shape as the board hold, and the same rule about the lock: `handle()`
+ * is called, the lock is released, and only then does this wait. A queued
+ * message already wakes the emitter — `writeQueue` goes through `store.set` —
+ * so nothing else had to be plumbed.
+ */
+async function longPollMsgs(req, waitSecs) {
+  const deadline = Date.now() + waitSecs * 1000
+  let out = await handle(req, store)
+  const empty = (o) => o.status === 200 && Array.isArray(o.json.msgs) && o.json.msgs.length === 0
+  if (!empty(out)) return out
+  while (Date.now() < deadline) {
+    await waitForChange(deadline - Date.now())
+    out = await handle(req, store)
+    if (!empty(out)) return out
   }
   return out
 }
@@ -265,9 +297,14 @@ const server = createServer(async (req, res) => {
         let out
         if (waitSecs !== undefined && isPlainPoll) {
           out = await longPoll(rreq, rreq.since, waitSecs)
+        } else if (waitSecs !== undefined && rreq.msgs) {
+          out = await longPollMsgs(rreq, waitSecs)
         } else {
           out = await handle(rreq, store)
         }
+        // Every GET answer from this host says it can hold one. That is how
+        // both ends learn to loop straight back instead of waiting out a timer,
+        // and why they must never assume it: the other hosts cannot.
         send(res, out.status, JSON.stringify(withLongPoll(out).json))
         return
       }

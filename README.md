@@ -224,7 +224,9 @@ READ-ONLY badge and the dropped-post toast.
   mapping, the routing guard, and the new query params.
 - `tests/server.test.mjs` — the real Node server, spawned on an ephemeral port
   with a throwaway data directory, driven over real HTTP: the static routes,
-  the 5 MB body bound, true long-poll, and concurrency — that no simultaneous
+  the 5 MB body bound, true long-poll on BOTH the board and the message queue
+  (including that a held poll does not block writes to the same board), and
+  concurrency — that no simultaneous
   write answers 5xx, that the queue holds exactly its cap rather than whichever
   writes won, and that N concurrent events advance `seq` by exactly N, on one
   board and across several sharing the store file.
