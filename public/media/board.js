@@ -15,6 +15,69 @@
     ready: false, mode: 'kanban', columns: [], cards: [], running: 0, waiting: 0,
     composer: { model: '', effort: 'high', thinking: 'enabled', models: [], efforts: [], contextTokens: 0 },
   }
+  /**
+   * WHAT THIS SURFACE IS LOOKING AT — owned here, not by the host.
+   *
+   * `mode` and `selectedKey` used to live in the host, in one pair of
+   * variables shared by the side bar, the editor panel and every remote page
+   * at once. Two things followed. You could not read one session on a phone
+   * and another in the editor — there was one selection. And a click could not
+   * draw anything until a message reached the host, the host changed its one
+   * `selectedKey`, and a whole state came back; remotely that is a network
+   * round trip for a decision the browser had already made.
+   *
+   * So the view decides, renders, and THEN tells the host — the same pattern
+   * `draft` and `disclosed` already use, and for the same reason: state the
+   * user put here must survive a repaint, and a repaint happens several times
+   * a second while an agent streams.
+   *
+   * `selectedKey` is a string, `''` for nothing selected, because that is what
+   * the `select` message carries. The state's own field is optional, so it is
+   * normalised on the way in.
+   */
+  let view = { mode: 'kanban', selectedKey: '' }
+  /** The first state seeds the view; after that the view is the truth. */
+  let viewSeeded = false
+  /**
+   * A view change posted and not yet echoed back by the host.
+   *
+   * The host still REDIRECTS the selection in cases the view cannot know
+   * about — a run getting its session id, a fork, an archive, a delete — so
+   * its `selectedKey` cannot simply be ignored. This tells the two apart:
+   * while a change of ours is in flight the host's value is stale and is
+   * dropped (that staleness is exactly what the old code waited for), and once
+   * it is echoed, or when nothing of ours is in flight, a differing host value
+   * is a redirect and is adopted. Step 4 of docs/REMOTE-REWORK.md §9 replaces
+   * the redirects with something the host announces; until then this bridge
+   * keeps every one of them working.
+   */
+  let viewPending = null
+  /**
+   * THE LAST FEW CONVERSATIONS THIS SURFACE HAS DRAWN.
+   *
+   * Switching to a chat you were just in should cost nothing, and without this
+   * it costs a round trip: the view moves first (see `setView`), so between the
+   * click and the host's answer there is nothing to draw and the panel says
+   * "Loading this conversation…" — for a conversation that was on this screen
+   * ten seconds ago and has not changed since.
+   *
+   * BOUNDED, and the bound is small on purpose: a transcript is the big object
+   * in this file and the webview holds it in memory. Three is enough for what
+   * people actually do — flick between two cards, glance back at the one they
+   * came from. The Map's own insertion order is the recency order, so eviction
+   * is `delete` the oldest key.
+   *
+   * What is NOT cached is as deliberate as what is. Only the rows: never
+   * `streaming` (a half-written line from a minute ago reads as an agent typing
+   * NOW, which is a signal that cannot say bad), never `review` (its file list
+   * is a claim about the worktree as it is), never `backgroundAgents` (their
+   * ages are drawn and would be wrong), and never the meters. Rows carry their
+   * own timestamps and are append-only, so an old copy of them is an old copy
+   * of something true; the rest are readings, and a stale reading is a lie.
+   */
+  const TRANSCRIPT_CACHE = 3
+  const cachedTranscripts = new Map()
+
   let dragKey = null
   let filter = ''
   let draft = ''
@@ -250,6 +313,8 @@
     const d = e.data
     if (d.type === 'state') {
       s = d.state
+      adoptView()
+      rememberTranscript()
       // A "load earlier" request is consumed by the frame whose transcript is
       // LONGER than what is on screen — the widened window — or by a frame for
       // a different session. Clearing on every frame would defeat the debounce:
@@ -257,7 +322,7 @@
       // a second click would double-widen. `syncRows` is the previous frame's
       // drawn rows, so the comparison runs against what was up when the click
       // happened.
-      if (moreFetching && ((s.transcript || []).length > syncRows.length || syncKey !== s.selectedKey)) {
+      if (moreFetching && (ourTranscript().length > syncRows.length || syncKey !== view.selectedKey)) {
         moreFetching = false
       }
       // Carried over when the host omitted it. Never the other way round: an
@@ -332,6 +397,110 @@
   document.addEventListener('click', () => { if (openMenu) { openMenu = null; render() } })
 
   const post = (type, payload) => vscode.postMessage({ type, ...payload })
+
+  /** Fold a fresh state into the view: seed it once, then adopt only what the
+   *  host changed on its own. See `viewPending`. */
+  function adoptView() {
+    const host = { mode: s.mode || 'kanban', selectedKey: s.selectedKey || '' }
+    if (!viewSeeded) { view = host; viewSeeded = true; return }
+    const same = (a, b) => a.mode === b.mode && a.selectedKey === b.selectedKey
+    /* The host has ANSWERED about the key we are on: the card is no longer on
+       the board. Stay put so the board can say so under the title it has,
+       rather than sliding to the new-session screen and leaving "where did my
+       chat go?" as the only reading available. It is also the answer to a
+       change of ours if one was in flight, so that stops waiting. */
+    if (s.vanished && s.vanished === view.selectedKey) {
+      if (viewPending && viewPending.selectedKey === s.vanished) viewPending = null
+      return
+    }
+    if (viewPending) {
+      // Ours has landed; anything after this that differs is the host's doing.
+      if (same(host, viewPending)) viewPending = null
+      return
+    }
+    if (!same(host, view)) view = host
+  }
+
+  /**
+   * Is the state's SESSION-SCOPED half about the session this view is showing?
+   *
+   * `transcript`, `streaming`, `review`, `backgroundAgents` and the composer's
+   * three meters all describe whatever the HOST currently has selected. The
+   * view now moves first, so between a click and the host catching up they
+   * describe the session we just left — and drawing those under the new
+   * session's title is not a slower board, it is a wrong one. A search jump
+   * proved it: the flash landed on the old transcript's row and was spent
+   * before the right rows ever arrived.
+   *
+   * Step 2 of docs/REMOTE-REWORK.md §9 removes the question by serving a slice
+   * per watcher. Until then this is the guard, and it is deliberately about
+   * IDENTITY rather than freshness: a frame is ours or it is not.
+   */
+  function sliceIsOurs() {
+    return (s.selectedKey || '') === view.selectedKey
+  }
+
+  /**
+   * The rows to draw: the host's, or the last copy WE drew of this same
+   * conversation while its own slice is in flight.
+   *
+   * A cache hit is not a guess about the host's answer — it is this session's
+   * own rows, a moment old, replaced the instant the real slice lands. The
+   * alternative is a spinner over a conversation the reader was just in.
+   */
+  function ourTranscript() {
+    if (sliceIsOurs()) return s.transcript || []
+    const hit = cachedTranscripts.get(view.selectedKey)
+    return hit ? hit.rows : []
+  }
+
+  /** What to call the session on screen when its card is no longer on the
+   *  board. "New session" would be a lie — this is a conversation that exists
+   *  and was open a moment ago — so the last title we drew for it stands, and
+   *  the neutral word only when we never drew one. */
+  function ourTitle() {
+    const hit = cachedTranscripts.get(view.selectedKey)
+    return (hit && hit.title) || 'Session'
+  }
+
+  /** Keep what we have just drawn, so coming back to it is instant. Called on
+   *  every state, after `adoptView()` — only for rows the host says are this
+   *  session's, or the cache would fill with other sessions' conversations
+   *  under this one's key. */
+  function rememberTranscript() {
+    const key = view.selectedKey
+    if (!key || !sliceIsOurs() || !Array.isArray(s.transcript)) return
+    // Re-inserted rather than updated in place: the Map's insertion order IS
+    // the recency order, and that is what makes eviction a one-liner.
+    cachedTranscripts.delete(key)
+    // The title rides along: it is drawn from the CARD, and the moment a card
+    // leaves the board there is nothing left on screen to name the session by.
+    cachedTranscripts.set(key, { rows: s.transcript, title: (card(key) || {}).title })
+    while (cachedTranscripts.size > TRANSCRIPT_CACHE) {
+      cachedTranscripts.delete(cachedTranscripts.keys().next().value)
+    }
+  }
+
+  /**
+   * Change what this surface is looking at: render FIRST, then tell the host.
+   *
+   * The inversion is the whole point — the old order made a click wait for a
+   * round trip to decide something the view already knew. Both fields are
+   * posted even when only one moved, because the host's two messages are
+   * idempotent and one code path is worth more than two saved postMessages.
+   */
+  function setView(next) {
+    const merged = {
+      mode: next.mode ?? view.mode,
+      selectedKey: 'selectedKey' in next ? (next.selectedKey || '') : view.selectedKey,
+    }
+    if (merged.mode === view.mode && merged.selectedKey === view.selectedKey) return
+    view = merged
+    viewPending = { ...merged }
+    render()
+    post('select', { id: view.selectedKey })
+    post('setMode', { mode: view.mode })
+  }
   const el = (tag, cls, text) => {
     const n = document.createElement(tag)
     if (cls) n.className = cls
@@ -339,7 +508,7 @@
     return n
   }
   const card = (k) => s.cards.find((c) => c.key === k)
-  const selected = () => (s.selectedKey ? card(s.selectedKey) : undefined)
+  const selected = () => (view.selectedKey ? card(view.selectedKey) : undefined)
   const stop = (e) => e.stopPropagation()
 
   function render() {
@@ -412,7 +581,7 @@
 
     const shell = el('div', 'shell')
     shell.append(renderRail())
-    shell.append(searching ? renderSearch() : (s.mode === 'chat' ? renderChat() : renderKanban()))
+    shell.append(searching ? renderSearch() : (view.mode === 'chat' ? renderChat() : renderKanban()))
     root.append(shell)
 
     forEachScroll((n) => { const k = n.getAttribute('data-scroll'); if (scrolled[k]) n.scrollTop = scrolled[k] })
@@ -493,7 +662,7 @@
     delete composer.contextWindow
     delete composer.meter
     return JSON.stringify([
-      s.mode, s.selectedKey || '', !!s.ready, !!s.noWorkspace, !!s.noRepo,
+      view.mode, view.selectedKey, !!s.ready, !!s.noWorkspace, !!s.noRepo,
       !!s.focused, !!s.boardOpen, !!s.showArchived, s.busy || '',
       s.olderHidden || 0, !!s.showOlder, picked.size,
       // Ages are DRAWN by ago(), so they enter at minute resolution for the
@@ -501,7 +670,7 @@
       // constantly, and raw milliseconds would differ on every frame.
       (s.backgroundAgents || []).map((a) => [a.id, a.status, Math.floor((a.lastFrameAt || 0) / 60000)]),
       !!searching, !!control, s.running || 0, s.waiting || 0,
-      !!s.transcriptMore,
+      !!s.transcriptMore, sliceIsOurs(), s.vanished || '',
       cards, composer, s.columns || [], s.commands || [],
       s.disclosures || {}, s.review || null, s.pendingMerge || null,
     ])
@@ -556,7 +725,7 @@
     if (!s.ready || s.noWorkspace) return false
     if (control) return syncCards()
     if (searching) return syncCards()
-    if (s.mode === 'chat') return syncApply()
+    if (view.mode === 'chat') return syncApply()
     return syncCards()
   }
 
@@ -582,7 +751,11 @@
    *  here are the fast path's safety net, and a full render is always a
    *  correct (if slower) fallback. */
   function syncApply() {
-    if (control || searching || s.mode !== 'chat' || !s.selectedKey || !s.ready || s.noWorkspace) return false
+    if (control || searching || view.mode !== 'chat' || !view.selectedKey || !s.ready || s.noWorkspace) return false
+    // Patching the rows on screen with another session's transcript would be
+    // the same wrongness as drawing it, arrived at more cheaply. See
+    // `sliceIsOurs`; a full render draws the waiting state instead.
+    if (!sliceIsOurs()) return false
     const c = selected()
     const sc = root.querySelector('.transcript-scroll')
     if (!c || !sc) return false
@@ -923,8 +1096,8 @@
     const rail = el('aside', 'rail')
     const head = el('div', 'rail-head')
     head.append(el('div', 'rail-title', 'Agent Sessions'))
-    const t = el('button', 'pill' + (s.mode === 'kanban' ? ' on' : ''), '▤ Kanban')
-    t.onclick = () => { closeSearch(); post('setMode', { mode: s.mode === 'kanban' ? 'chat' : 'kanban' }) }
+    const t = el('button', 'pill' + (view.mode === 'kanban' ? ' on' : ''), '▤ Kanban')
+    t.onclick = () => { closeSearch(); setView({ mode: view.mode === 'kanban' ? 'chat' : 'kanban' }) }
     head.append(t)
     // Transcript search — its screen replaces the main area, whichever mode it
     // was opened from, so the toggle has to live in the rail, the one thing
@@ -957,7 +1130,7 @@
     rail.append(search)
 
     const nw = el('button', 'primary new-session', '+ New session')
-    nw.onclick = () => { closeSearch(); post('select', { id: '' }); post('setMode', { mode: 'chat' }) }
+    nw.onclick = () => { closeSearch(); setView({ selectedKey: '', mode: 'chat' }) }
     rail.append(nw)
 
     const list = el('div', 'rail-list')
@@ -1062,8 +1235,8 @@
   }
 
   function renderRailItem(c) {
-    const row = el('div', 'rail-item' + (c.key === s.selectedKey ? ' active' : '') + (c.archived ? ' archived' : ''))
-    row.onclick = () => { closeSearch(); post('select', { id: c.key }); post('setMode', { mode: 'chat' }) }
+    const row = el('div', 'rail-item' + (c.key === view.selectedKey ? ' active' : '') + (c.archived ? ' archived' : ''))
+    row.onclick = () => { closeSearch(); setView({ selectedKey: c.key, mode: 'chat' }) }
     const top = el('div', 'rail-item-top')
     // Selectable from here too. The rail is where a board holding dozens of
     // adopted sessions actually looks like a mess, so making the kanban card
@@ -1143,7 +1316,7 @@
   function renderToolbar() {
     const bar = el('div', 'toolbar')
     const add = el('button', 'primary', '+ New session')
-    add.onclick = () => { post('select', { id: '' }); post('setMode', { mode: 'chat' }) }
+    add.onclick = () => setView({ selectedKey: '', mode: 'chat' })
     bar.append(add)
     bar.append(el('div', 'spacer'))
     const parts = []
@@ -1276,7 +1449,7 @@
       e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', c.key)
     })
     n.addEventListener('dragend', () => { n.classList.remove('dragging'); dragKey = null })
-    n.onclick = () => { post('select', { id: c.key }); post('setMode', { mode: 'chat' }) }
+    n.onclick = () => setView({ selectedKey: c.key, mode: 'chat' })
 
     /* A subtask says where it came from, at the top, before its own title.
        Without it the board just grows two extra cards after a split and nothing
@@ -1284,7 +1457,7 @@
     if (c.parentTitle) {
       const up = el('button', 'subtask-of', '↳ ' + c.parentTitle)
       up.title = 'Part of "' + c.parentTitle + '" — open it'
-      up.onclick = (e) => { stop(e); post('select', { id: c.parent }); post('setMode', { mode: 'chat' }) }
+      up.onclick = (e) => { stop(e); setView({ selectedKey: c.parent, mode: 'chat' }) }
       n.append(up)
     }
 
@@ -1445,7 +1618,7 @@
       row.append(el('span', 'subtask-name', t.title))
       row.append(phaseChip(t.phase))
       row.title = 'Open "' + t.title + '"'
-      row.onclick = (e) => { stop(e); post('select', { id: t.key }); post('setMode', { mode: 'chat' }) }
+      row.onclick = (e) => { stop(e); setView({ selectedKey: t.key, mode: 'chat' }) }
       box.append(row)
     }
     return box
@@ -1784,10 +1957,10 @@
     if (c && c.parentTitle) {
       const up = el('button', 'subtask-of', '↳ ' + c.parentTitle)
       up.title = 'Part of "' + c.parentTitle + '" — open it'
-      up.onclick = () => post('select', { id: c.parent })
+      up.onclick = () => setView({ selectedKey: c.parent })
       titles.append(up)
     }
-    titles.append(el('div', 'chat-title', c ? c.title : 'New session'))
+    titles.append(el('div', 'chat-title', c ? c.title : (view.selectedKey ? ourTitle() : 'New session')))
     if (c) {
       const tags = el('div', 'labels')
       tags.append(phaseChip(c.phase))
@@ -1797,7 +1970,7 @@
     head.append(titles)
     head.append(el('div', 'spacer'))
     const toKanban = el('button', 'pill', '▤ Kanban')
-    toKanban.onclick = () => post('setMode', { mode: 'kanban' })
+    toKanban.onclick = () => setView({ mode: 'kanban' })
     head.append(toKanban)
     head.append(focusButton())
     if (c) {
@@ -1854,9 +2027,15 @@
     // Above the review panel and NOT gated on `c.worktree`: the merge is on the
     // user's own branch, so it is true of the repository whatever card happens
     // to be open, including one that never had a worktree.
-    if (s.backgroundAgents && s.backgroundAgents.length) main.append(renderBackgroundAgents())
+    /* `backgroundAgents` and `review` describe the session the HOST has for
+       this surface, so they are drawn only when that is the one on screen.
+       Unlike the rows, they are readings — an age, a file list — and an old
+       reading under a new title is a signal that cannot say bad. `pendingMerge`
+       is not gated: it is a fact about the REPOSITORY and stays true whatever
+       card is open. */
+    if (sliceIsOurs() && s.backgroundAgents && s.backgroundAgents.length) main.append(renderBackgroundAgents())
     if (s.pendingMerge) main.append(renderPendingMerge())
-    if (c && c.worktree) main.append(renderReview(c))
+    if (c && c.worktree && sliceIsOurs()) main.append(renderReview(c))
 
     syncKey = c ? c.key : null
     const scroll = el('div', 'transcript-scroll')
@@ -1870,11 +2049,26 @@
     syncAskNode = null
     syncEmptyNode = null
     syncHintNode = null
-    if (!c) {
+    const rows = ourTranscript()
+    if (!c && view.selectedKey) {
+      /* A card we were watching and can no longer find. `vanished` says the
+         host agrees it is gone; without it this is the same frame as one where
+         the cards simply have not arrived, so it stays a statement about the
+         BOARD and never a claim about what happened to the session. */
+      syncEmptyNode = el('div', 'empty', s.vanished === view.selectedKey
+        ? 'This session is no longer on the board. It may have been deleted, archived, or hidden by the age filter.'
+        : 'Loading this conversation…')
+      scroll.append(syncEmptyNode)
+    } else if (!c) {
       syncHintNode = renderNewSessionHint()
       scroll.append(syncHintNode)
-    } else if (!s.transcript || !s.transcript.length) {
-      syncEmptyNode = el('div', 'empty', 'No transcript yet.')
+    } else if (!rows.length) {
+      /* Nothing to draw, and WHY decides what it says. Either the host's answer
+         for this session is still in flight and we have no copy of our own (see
+         `ourTranscript`) — a board showing one session's title over another's
+         conversation is worse than one that admits it is still fetching — or
+         this session genuinely has no conversation yet. */
+      syncEmptyNode = el('div', 'empty', sliceIsOurs() ? 'No transcript yet.' : 'Loading this conversation…')
       scroll.append(syncEmptyNode)
     } else {
       // The row a search hit pointed at, when this session finally rendered —
@@ -1885,16 +2079,24 @@
       // actually on screen. Using that offset instead of shifting `jump.idx`
       // when a load-earlier prepends is what keeps a jump immune to a window
       // widening between the click and the render.
-      const want = jump && jump.key === c.key ? jump.idx - (s.transcriptHead || 0) : -1
-      for (let i = 0; i < s.transcript.length; i++) {
-        const e = s.transcript[i]
+      /* Only against the HOST's own rows. `transcriptHead` describes the
+         window the host cut, and a cached copy is not that window — a jump
+         translated by another session's head lands on the wrong row and is
+         spent doing it, which is the bug this offset exists to prevent. It
+         waits for its slice instead (JUMP_TTL). */
+      const want = sliceIsOurs() && jump && jump.key === c.key ? jump.idx - (s.transcriptHead || 0) : -1
+      for (let i = 0; i < rows.length; i++) {
+        const e = rows[i]
         const node = renderEntry(e, c)
         if (i === want) node.classList.add('hit-jump')
         syncRows.push({ node, sig: rowSig(e) })
         scroll.append(node)
       }
     }
-    if (s.streaming) {
+    // The same rule, and the sharpest case of it: a half-written line from the
+    // session we just left, drawn under this one's title, reads as an agent
+    // typing right now.
+    if (s.streaming && sliceIsOurs()) {
       syncStreamNode = renderStreaming(s.streaming)
       scroll.append(syncStreamNode)
     }
@@ -1920,8 +2122,8 @@
     // and the fast path finds it by class, both unchanged by the wrapper.
     const wrap = el('div', 'transcript-wrap')
     wrap.append(scroll)
-    if (s.transcriptMore) wrap.append(renderLoadEarlier())
-    if (c && s.transcript && s.transcript.length > 1) wrap.append(renderJumps())
+    if (s.transcriptMore && sliceIsOurs()) wrap.append(renderLoadEarlier())
+    if (c && ourTranscript().length > 1) wrap.append(renderJumps())
     main.append(wrap)
 
     main.append(renderComposer(c))
@@ -1938,7 +2140,7 @@
     pill.onclick = () => {
       if (moreFetching) return
       moreFetching = true
-      post('moreTranscript', { id: s.selectedKey })
+      post('moreTranscript', { id: view.selectedKey })
       // The click consumed the frame budget; re-render locally so the busy
       // state is visible without waiting for the round trip.
       render()
@@ -2117,12 +2319,13 @@
       // is), so jumping to one first reveals it — same tap count as any other
       // hit, and honest: the chat opens on the session, not on a blank.
       if (!c && !s.showArchived) post('toggleArchived')
-      // `openHit`, not `select`: the index is into the FULL transcript, and
-      // the host widens the chat's window to include it — otherwise the flash
-      // would land on "somewhere in the tail", not on the row the snippet
-      // came from.
+      // Open it HERE first, so the chat is on screen immediately…
+      setView({ selectedKey: r.key, mode: 'chat' })
+      // …then `openHit` rather than a bare select, because the index is into
+      // the FULL transcript and the host widens this chat's window to include
+      // it — otherwise the flash lands on "somewhere in the tail" rather than
+      // on the row the snippet came from.
       post('openHit', { id: r.key, idx: r.entryIndex })
-      post('setMode', { mode: 'chat' })
     }
     const top = el('div', 'srow-top')
     top.append(el('span', 'srow-title', (c && c.title) || r.title || r.key))
@@ -2507,7 +2710,7 @@
         m.price || '',
         m.detail || '',
       ].filter(Boolean).join(' · '),
-    })), s.selectedKey, modelSourceNote()))
+    })), view.selectedKey, modelSourceNote()))
     /* The model-switch warning, built HOST-side (this file does no arithmetic
        on money): the selected session has a conversation, and the picker's
        model differs from the one it was on — the next turn re-reads it all
@@ -2548,7 +2751,7 @@
           value: a.key,
           label: a.label,
           meta: a.detail,
-        })), s.selectedKey, s.composer.backendNote))
+        })), view.selectedKey, s.composer.backendNote))
       }
     } else {
       bar.append(picker('agent', agentName(), (s.composer.agents || []).map((a) => ({
@@ -2577,7 +2780,7 @@
           value: o.key,
           label: o.label + ' — ' + o.detail,
         })),
-        s.selectedKey,
+        view.selectedKey,
         s.composer.orchestrationNote,
       ))
     }
@@ -2589,13 +2792,13 @@
        greyed out: "why is this disabled" has no answer worth reading. */
     if (s.composer.efforts.length) {
       bar.append(picker('effort', effortLabel(),
-        s.composer.efforts.map((e) => ({ value: e.key, label: e.label })), s.selectedKey))
+        s.composer.efforts.map((e) => ({ value: e.key, label: e.label })), view.selectedKey))
     }
     if (s.composer.thinkingSupported !== false) {
       bar.append(picker('thinking', 'Extended: ' + (s.composer.thinking === 'disabled' ? 'Off' : 'On'), [
         { value: 'enabled', label: 'Extended: On' },
         { value: 'disabled', label: 'Extended: Off' },
-      ], s.selectedKey))
+      ], view.selectedKey))
     }
     /* Ultracode: xhigh effort plus standing workflow orchestration. Offered
        ONLY on a model the CLI says can run it, because the flag itself is
