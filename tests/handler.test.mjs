@@ -553,6 +553,33 @@ const chatFor = (key) => ({ ready: true, mode: 'chat', selectedKey: key, cards: 
 }
 
 {
+  /* A viewer id is a NAME, and one name is not like the others. `viewers[k] = n`
+     on an ordinary object silently does nothing when k is `__proto__`, so that
+     slot would be untracked, never evicted, and its frame left behind for ever.
+     The clock's map is JSON off a store — another program's output — so it is
+     rebuilt with a null prototype rather than written in place. */
+  const store = fakeStore()
+  /* Times ASCENDING and pushes only — a board GET registers the viewer with the
+     wall clock, which would make whichever slot was read the most recent one and
+     turn this into a test of the harness. */
+  const t0 = Date.now()
+  await post(store, { body: frameBody({ at: t0, viewer: '__proto__', state: chatFor('odd') }) })
+  const listed = await handle({ method: 'GET', boardId: ID, msgs: true }, store)
+  ok(listed.json.viewers.includes('__proto__'),
+    'a slot named `__proto__` is TRACKED, so the eviction that bounds these slots can reach it')
+  const held = await getFor(store, { viewer: '__proto__' })
+  ok(held.json.frame.state.selectedKey === 'odd', 'and it holds its own frame like any other')
+  for (let i = 0; i < 4; i++) {
+    await post(store, { body: frameBody({ at: Date.now() + 1 + i, viewer: `later-${i}`, state: chatFor(`s-${i}`) }) })
+  }
+  const clock = JSON.parse(store.map.get(`s:${ID}`))
+  ok(!Object.keys(clock.viewers).includes('__proto__'),
+    'and it is evicted when four newer pages arrive, rather than leaking a frame nobody can reach')
+  ok(![...store.map.keys()].some((k) => k.endsWith(':__proto__')),
+    '…blob and patch ring with it')
+}
+
+{
   // A message says WHO asked, so a select from one phone does not move the
   // other one's board.
   const store = fakeStore()

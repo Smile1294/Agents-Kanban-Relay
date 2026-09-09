@@ -42,8 +42,16 @@ export const NONCE_OK = /^[A-Za-z0-9._-]{1,64}$/
  * A viewer id: one page, on one device, for as long as its browser keeps it.
  *
  * Not a credential and not a secret — the board id is still the only thing that
- * grants access, and a viewer id is only a NAME for a frame slot. It is checked
- * for shape because it becomes part of a store key.
+ * grants access, and a viewer id is only a NAME for a frame slot. Knowing one
+ * gets nobody anything; knowing the board id was already everything.
+ *
+ * It is checked for shape because it becomes part of a STORE KEY, and the
+ * character that matters is the one this charset leaves OUT. Keys are
+ * `f:<id>:<viewer>`, so a viewer containing `:` could name another board's slot
+ * — and one containing `/` could address a prefix on a store where `/` is
+ * structural. Neither is in here. No host turns a key into a filesystem path
+ * (the Node host writes one JSON file, the Worker uses KV, Netlify uses Blobs),
+ * so `.` and `..` are ordinary characters and are allowed.
  */
 export const VIEWER_OK = /^[A-Za-z0-9._-]{1,64}$/
 
@@ -158,13 +166,25 @@ const emptyClock = () => ({ seq: 0, at: 0, writes: false, mv: '', viewerAt: 0, f
  * caller can delete their blobs — a slot nobody can reach is just a leak.
  */
 function touchViewer(clock, viewer, now) {
-  if (!clock.viewers || typeof clock.viewers !== 'object') clock.viewers = {}
-  clock.viewers[viewer] = now
-  const names = Object.keys(clock.viewers)
+  /* REBUILT with a NULL PROTOTYPE rather than written in place.
+     `viewers[viewer] = now` on an ordinary object is silently DROPPED when the
+     viewer is literally `__proto__` — assigning a number to it is a no-op — so
+     that slot would never be tracked, never be evicted, and leave its frame
+     behind for ever. Rebuilding also means a stored value of the wrong shape
+     cannot decide the sort below: this map is JSON that came back off a store,
+     which is to say another program's output. */
+  const seen = Object.create(null)
+  const held = clock.viewers && typeof clock.viewers === 'object' ? clock.viewers : {}
+  for (const name of Object.keys(held)) {
+    if (typeof held[name] === 'number') seen[name] = held[name]
+  }
+  seen[viewer] = now
+  clock.viewers = seen
+  const names = Object.keys(seen)
   if (names.length <= VIEWERS_MAX) return []
-  names.sort((a, b) => (clock.viewers[b] || 0) - (clock.viewers[a] || 0))
+  names.sort((a, b) => seen[b] - seen[a])
   const dropped = names.slice(VIEWERS_MAX)
-  for (const d of dropped) delete clock.viewers[d]
+  for (const d of dropped) delete seen[d]
   return dropped
 }
 

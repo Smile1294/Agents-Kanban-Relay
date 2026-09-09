@@ -60,7 +60,18 @@ Three rules make it safe to roll out:
   chain it has been following.
 - Slots are **bounded** (`viewersMax`), evicting the least recently seen. Each
   slot is a whole board, and a page that opens once and never comes back must
-  not cost the relay one for ever.
+  not cost the relay one for ever. The bookkeeping map is rebuilt with a **null
+  prototype** on every touch: `viewers[v] = now` on an ordinary object is
+  silently dropped when `v` is literally `__proto__`, so that slot would never
+  be tracked, never be evicted, and leave its frame behind for ever.
+
+A viewer id becomes part of a store key, and the character that matters is the
+one `viewerOk` leaves **out**. Keys are `f:<id>:<viewer>`, so a viewer
+containing `:` could name another board's slot, and one containing `/` could
+address a prefix on a store where `/` is structural. Neither is in the charset.
+No host turns a key into a filesystem path — the Node host writes one JSON
+file, the Worker uses KV, Netlify uses Blobs — so `.` and `..` are ordinary
+characters and are allowed.
 
 A board GET carrying `v` is also how the relay learns that viewer is here — a
 page that only reads never sends a message — and `?msgs=1` answers `viewers[]`,
