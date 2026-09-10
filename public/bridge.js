@@ -241,13 +241,28 @@
     pollTimer = setTimeout(poll, 1_000)
   }
 
+  /**
+   * How long to wait before the next board read, when the relay cannot hold
+   * the request open (every host but the plain Node one).
+   *
+   * Keyed on whether SOMEBODY IS LOOKING, not on how quiet the board is. It
+   * used to back off on the age of the last frame — 2s, then 15s past thirty
+   * seconds of quiet, then 60s past ten minutes — which reads as a sensible
+   * idle rule and is exactly backwards. An idle board is precisely the one a
+   * person is about to tap: the machine heartbeats only every 90s, so a phone
+   * watching a board with no agent running sat at the 15s or 60s step, and
+   * opening a conversation took that long to come back. "It takes multiple
+   * seconds even to load" was this line.
+   *
+   * A hidden page is the one case where backing off is right — a phone in a
+   * pocket must not poll — and `visibilitychange` polls immediately on the way
+   * back, so returning to the tab is not a wait of one long interval.
+   */
   function nextDelay() {
     if (error) return 15_000
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return 60_000
     if (Date.now() < burstUntil) return 1_000
-    const quiet = Date.now() - at
-    if (quiet < 30_000) return 2_000
-    if (quiet < 10 * 60_000) return 15_000
-    return 60_000
+    return 2_000
   }
 
   function poll() {
@@ -657,6 +672,16 @@
   }
 
   // Repaint ages every 10 s without touching board.js's DOM.
+  // Back to the front: read the board NOW rather than at the end of whatever
+  // interval was running when the page was hidden.
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible' || !id) return
+      clearTimeout(pollTimer)
+      pollTimer = setTimeout(poll, 0)
+    })
+  }
+
   setInterval(() => { if (id) renderStatus() }, 10_000)
 
   // --- connect ---------------------------------------------------------------

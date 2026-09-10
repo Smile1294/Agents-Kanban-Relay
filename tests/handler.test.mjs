@@ -187,6 +187,55 @@ const post = (store, over = {}) => handle({
     `and it still fits the ring ceiling, because the POST guard measures more (${text.length})`)
 }
 
+// --- the frame answer names the slots, so READING is enough to be served -----
+//
+// The machine learned who was watching only from `?msgs=1`, which is the WRITE
+// channel and does not run while `remote.writes` is off — the default. So a
+// page that only read was never discovered, no slot was ever built for it, and
+// every browser fell back to the shared slot: the board could only show the
+// conversation the computer had open. The list rides the frame POST too, which
+// the machine makes whatever the write toggle says.
+
+{
+  const store = fakeStore()
+  await post(store, { body: frameBody() })            // the machine is pushing
+  // A page that has NEVER posted a message — it only reads the board.
+  await handle({ method: 'GET', boardId: ID, since: 0, viewer: 'reader-1' }, store)
+  const r = await post(store, { body: frameBody({ at: 1001 }) })
+  ok(Array.isArray(r.json.slots), 'a frame answer carries the slot list')
+  ok(r.json.slots.includes('reader-1'),
+    'including a viewer that has only READ — being served must not require writing')
+
+  // THE ARRIVAL, past a hot throttle. `clock.viewerAt` is ONE board-wide
+  // timestamp, so a second page polling while the first keeps that window warm
+  // was skipped — for minutes, or for as long as anyone else kept polling. The
+  // machine builds a board per slot it is told about, so a page it is never
+  // told about reads the shared slot for ever: the browser stuck on whatever
+  // conversation the computer had open. An arrival is not a refresh.
+  await handle({ method: 'GET', boardId: ID, since: 0, viewer: 'reader-1' }, store)  // keeps it hot
+  const second = await handle({ method: 'GET', boardId: ID, since: 0, viewer: 'reader-2' }, store)
+  ok(second.status === 200, 'a second page polls moments after the first')
+  const r2 = await post(store, { body: frameBody({ at: 2000 }) })
+  ok(r2.json.slots.includes('reader-2'),
+    'and is registered AT ONCE, not when the board-wide throttle happens to be cold')
+  ok(r2.json.slots.length === 2, 'both pages are slots, neither displacing the other')
+  // NOT asserting which of the two comes first: both were seen within the same
+  // millisecond, and `Date.now()` cannot order them. The list is sorted by last
+  // seen, ties fall where they fall, and a test that pins a tie is testing the
+  // clock's resolution rather than the code.
+
+  const viaMsgs = await handle({ method: 'GET', boardId: ID, msgs: true }, store)
+  ok(JSON.stringify(viaMsgs.json.viewers) === JSON.stringify(r2.json.slots),
+    'and it is the SAME list ?msgs=1 answers — two answers that must agree, from one place')
+
+  // The throttle still does its job for a viewer already known: a poll from a
+  // registered page must not write the clock every time.
+  const before = store.writes.length
+  await handle({ method: 'GET', boardId: ID, since: 0, viewer: 'reader-2' }, store)
+  ok(store.writes.length === before,
+    'a KNOWN viewer polling again writes nothing — the throttle is intact where it belongs')
+}
+
 // --- the message queue -------------------------------------------------------
 
 const postMsg = (store, nonce, msg, extra = {}) => post(store, {

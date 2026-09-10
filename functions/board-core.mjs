@@ -450,6 +450,18 @@ async function postFrame(store, id, body) {
   // v3 relay handed `viewer` ignores it and every page would share one frame
   // again, silently.
   answer.viewers = true
+  /* WHICH slots this board is keeping, newest-seen first.
+   *
+   * The same list `?msgs=1` answers, carried on the PUSH as well, because the
+   * machine must be able to learn who is reading WITHOUT reading the message
+   * queue: the queue is the write channel and a board may legitimately have
+   * writes turned off, while a page that only ever reads still needs a board
+   * built for it. Riding the frame POST costs nothing — the clock is already
+   * read and written on this path — and a relay that does not send it leaves
+   * the field absent, which the pusher treats as "not answered", never as
+   * "no viewers". */
+  answer.slots = Object.keys(clock.viewers && typeof clock.viewers === 'object' ? clock.viewers : {})
+    .sort((a, b) => (clock.viewers[b] || 0) - (clock.viewers[a] || 0))
   if (needFrame) answer.needFrame = true
   answer.msgs = await readQueue(store, id)
   return ok(answer)
@@ -591,9 +603,24 @@ async function getBoard(store, id, since, wantsDeltas, viewer) {
     return answer
   }
 
-  // Viewer presence, throttled: read, compare, conditional write. A clock
-  // write per poll would be a bug on every host.
-  if (Date.now() - (clock.viewerAt || 0) >= 20_000) {
+  /* Viewer presence: read, compare, conditional write. A clock write per poll
+     would be a bug on every host, so a viewer already in the map is refreshed
+     at most every 20 s.
+     But `clock.viewerAt` is ONE board-wide timestamp, so that throttle alone
+     skipped an ARRIVAL: with any page polling every couple of seconds the
+     window was permanently hot, and a second phone could poll for minutes
+     without ever being written into `clock.viewers`. The machine builds a
+     board per slot it is told about, so an unregistered page fell back to the
+     shared slot for ever — the browser showing only the conversation the
+     computer had open. An arrival is not a refresh: it is rare, it is what the
+     whole per-viewer scheme depends on, and it is recorded at once.
+     `typeof … === 'number'` rather than `in` or a truthiness test, for the
+     `__proto__` reason `touchViewer` documents: that key reads back as an
+     object, so it is correctly treated as unknown and registered. */
+  const known = clock.viewers && typeof clock.viewers === 'object'
+    && typeof clock.viewers[viewer] === 'number'
+  const arriving = !!viewer && !known
+  if (arriving || Date.now() - (clock.viewerAt || 0) >= 20_000) {
     const now = Date.now()
     clock.viewerAt = now
     if (viewer) {
