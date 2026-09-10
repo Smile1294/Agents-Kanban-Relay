@@ -28,9 +28,18 @@
  *    dangerous, so it is bounded (a handful of entries, each a bounded JSON)
  *    and — the load-bearing half — it is the EXTENSION that decides whether a
  *    message runs. The relay only holds them.
- *  - A board id is 24 hex chars of a sha-256 (~96 bits). Nobody guesses one;
- *    nobody can LIST the boards, because list happens under one fixed store and
- *    no endpoint enumerates ids.
+ *  - Nobody can LIST the boards: list happens under one fixed store and no
+ *    endpoint enumerates ids.
+ *  - A board id is 24 hex chars of a sha-256, and the digest's width is NOT
+ *    the strength. The mapping from code to id is public, deterministic,
+ *    unsalted and one cheap hash, so the id's real search space is exactly the
+ *    entropy of the pairing code somebody chose: `kanban2026` falls to an
+ *    offline sweep in seconds, and this relay has no throttle that would
+ *    notice — the attacker never has to ask it anything until the answer is
+ *    already right. Guessing the id is therefore guessing the CODE, which is
+ *    why the extension refuses short ones (`PAIRING_CODE_MIN`) and offers a
+ *    generated 96-bit code instead. Against a generated code this line is
+ *    true; against a typed one it never was.
  */
 
 export const ID_OK = /^[0-9a-f]{24}$/i

@@ -122,9 +122,13 @@ reachable from those networks.
 
 1. In Agents Kanban: open the **settings page → Remote Control**.
 2. Paste the relay URL into *Relay site*.
-3. Choose a **pairing code** — any string, like a password — and type it into
-   the *Pairing code* field. The same code opens the board on any device that
+3. Set a **pairing code** — press **Generate** in the extension's settings and
+   let it hand you one. The same code opens the board on any device that
    watches it; the code itself is stored only in your keychain, never here.
+   Do not invent one: the board's address is derived from it by a public,
+   unsalted hash, so a code a person would think of can be swept offline (see
+   *How the privacy works*). The extension refuses anything under 16
+   characters.
 4. Press **Save and connect**. The board starts pushing within seconds.
 
 To watch from a phone or another computer, open the site and enter the same
@@ -134,9 +138,16 @@ board*.
 ## How the privacy works
 
 - The relay stores **nothing secret**. A board's address is the first 24 hex
-  chars of the sha-256 of your pairing code (~96 bits) — the relay never sees
-  the code, so it cannot be robbed for it. The pairing code never leaves your
-  machine.
+  chars of the sha-256 of your pairing code — the relay never sees the code, so
+  it cannot be robbed for it. The pairing code never leaves your machine.
+- **The address is only as strong as the code**, and the 24 hex chars are not a
+  second lock. Code → address is public, deterministic, unsalted and one cheap
+  hash, so anyone who wants a board can try codes *offline*, as fast as their
+  hardware allows, and only contact the relay once the answer is already right —
+  there is no rate limit that could see them coming. And that address is read
+  **and** write: a GET returns the whole board, and with actions enabled a POST
+  queues messages for your machine. So take the **generated** code (96 random
+  bits); a code you thought of is the entire security of the board.
 - The page shows nothing until a code is entered, and only the board that code
   derives is reachable. There is no list of boards and no login to expire or
   be phished.

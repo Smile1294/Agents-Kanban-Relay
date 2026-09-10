@@ -32,7 +32,12 @@ half of it.
 
 Every host serves one API at `fnPath` (`/board`). A board's address is the
 first 24 hex chars of the sha-256 of its pairing code; possession of the id is
-read **and** write (writes travel with the id as `x-rc-key`). The constants in
+read **and** write (writes travel with the id as `x-rc-key`). The truncation is
+not a weakening and the digest is not a strengthening: the derivation is public,
+unsalted and one hash, so the id is worth exactly the entropy of the code — a
+typed code can be swept offline with no request to this relay at all. The
+extension enforces a floor and generates codes for this reason; the relay itself
+cannot tell a strong id from a weak one. The constants in
 `remote-contract.json` are enforced in `functions/board-core.mjs` as `ID_OK`,
 `NONCE_OK`, `TYPE_OK`, `MSG_MAX`, `MSG_MAX_BYTES`, `FRAME_MAX_BYTES`,
 `EVENTS_MAX`, `VIEWER_OK`, `VIEWERS_MAX` and `FN_PATH`.

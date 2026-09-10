@@ -306,7 +306,16 @@ button[disabled] { cursor: default; }
 @keyframes spin { to { transform: rotate(360deg) } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s } }
 
-.ask code { display: block; word-break: break-all; font-family: var(--vscode-editor-font-family); font-size: 0.95em; }
+/* The text an Allow/Deny decision is made on. `pre-wrap` because a command or a
+   subtask brief has lines and they mean something; bounded and SCROLLABLE
+   because the whole of it has to be reachable — it used to be cut at 200
+   characters with no marker, so a payload past that point was authorised by a
+   click that never showed it. */
+.ask code {
+  display: block; white-space: pre-wrap; word-break: break-word;
+  max-height: 40vh; overflow: auto;
+  font-family: var(--vscode-editor-font-family); font-size: 0.95em;
+}
 .row-actions { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
 /* Inside a card or a prompt the whole width is ~300px, so these are the
    compact size. The review panel's and the merge banner's actions are full
