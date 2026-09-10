@@ -460,6 +460,20 @@ async function postFrame(store, id, body) {
 /** `{ kind:'event', events:[msg, ...] }` — appends host-to-page events, each
  *  with a `type` matching typeOk, dropping the oldest past eventsMax. */
 async function postEvent(store, id, body) {
+  // Events were the ONE thing this relay stores with no size rule at all: a
+  // frame is checked, a message is checked, and `EVENTS_MAX` bounded only the
+  // COUNT — fifty entries of any size each, in a blob every board GET reads
+  // back. Today's extension stays far inside it (search caps at 200 hits with
+  // a 340-character snippet, ~80KB), so this is not a bug anyone has hit; it
+  // is the rule that was missing, which is what makes the next event type — or
+  // anyone holding the board id, since possession is write — a storage problem
+  // instead of a refusal. Bounded the same way a frame is and by the same
+  // number: the frame is the largest thing stored for a board, so "the event
+  // ring may not exceed what one frame may" needs no new constant and no
+  // contract change.
+  if (jsonBytes(body) > FRAME_MAX_BYTES) {
+    return fail(413, 'the events are larger than the relay accepts')
+  }
   const events = Array.isArray(body.events) ? body.events : []
   for (const msg of events) {
     if (!msg || typeof msg !== 'object') return fail(400, 'an event must be an object')
@@ -477,7 +491,19 @@ async function postEvent(store, id, body) {
     ring.push({ seq: clock.seq, msg })
   }
   while (ring.length > EVENTS_MAX) ring.shift()
-  await store.set(eventsBlob(id), JSON.stringify(ring))
+  // The BYTE ceiling, applied after the count. Dropping the oldest is what the
+  // count rule already does and the page already survives: a reader older than
+  // the ring is answered with everything retained and `gap: true`, so an early
+  // eviction takes the SAME path a slow poller already takes. One entry is
+  // never evicted to nothing — a single event over the ceiling is stored
+  // alone, because the alternative is silently discarding the search result
+  // the user is waiting for and answering `ok`.
+  let text = JSON.stringify(ring)
+  while (ring.length > 1 && text.length > FRAME_MAX_BYTES) {
+    ring.shift()
+    text = JSON.stringify(ring)
+  }
+  await store.set(eventsBlob(id), text)
   await writeClock(store, id, clock)
   return ok({ ok: true, seq: clock.seq })
 }

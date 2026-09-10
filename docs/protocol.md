@@ -90,7 +90,7 @@ most recently seen first, so the pushing machine knows who to build a board for.
 | `f:<id>[:<viewer>]` | the latest frame FOR THAT VIEWER (no suffix = the shared slot): `{ seq, frame }`, `frame` = `{ type:'state', state }` — as pushed, or COMPOSED from the patches since (the extension has already removed `state.composer.models`). Always a complete board. |
 | `d:<id>[:<viewer>]` | that viewer's ring of frame patches `[{ seq, base, patch }]`, at most `deltasMax`, oldest dropped, cleared by any whole state. |
 | `m:<id>` | the model catalogue: `{ mv, models }`. |
-| `e:<id>` | a ring of host→page events `[{ seq, msg }]`, at most `eventsMax`, oldest dropped. |
+| `e:<id>` | a ring of host→page events `[{ seq, msg }]`, at most `eventsMax` entries AND at most `frameMaxBytes` serialised, oldest dropped for either. |
 | `q:<id>` | the queue of page→host messages `[{ nonce, at, msg, viewer? }]`, at most `msgMax`, FIFO. `viewer` says who asked, so a `select` from one phone does not move the other one's board. |
 
 ## POST kinds
@@ -114,9 +114,15 @@ most recently seen first, so the pushing machine knows who to build a board for.
   `viewers:true` so it learns this relay keeps a slot per viewer. Neither is
   ever assumed: a v3 relay handed `viewer` ignores it and every page silently
   shares one frame again.
-- `{ kind:'event', events:[msg, ...] }` — each `msg` is an object whose `type`
-  matches `typeOk`; append each with `seq+1`; keep at most `eventsMax`. Answer
-  `{ ok:true, seq }`.
+- `{ kind:'event', events:[msg, ...] }` — `JSON.stringify(body).length <=
+  frameMaxBytes` (413 otherwise); each `msg` is an object whose `type` matches
+  `typeOk`; append each with `seq+1`; keep at most `eventsMax` AND at most
+  `frameMaxBytes` of serialised ring, dropping the oldest for either (never the
+  last one). `eventsMax` bounds the count and the byte rule bounds the size —
+  without the second, fifty entries of any size each is an unbounded blob that
+  every board GET reads back. A reader older than what survived is answered
+  with everything retained and `gap:true`, the same as any other eviction.
+  Answer `{ ok:true, seq }`.
 - `{ kind:'msg', nonce, viewer?, msg }` — `nonce` matches `nonceOk`; `msg` is
   an object; `msg.type` matches `typeOk`; `JSON.stringify(body).length <=
   msgMaxBytes` (413 otherwise); the same nonce already queued → `{ ok:true }`

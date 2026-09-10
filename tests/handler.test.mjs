@@ -127,6 +127,66 @@ const post = (store, over = {}) => handle({
     'a poll within the retained ring reads only the newer events, no gap')
 }
 
+// --- the event ring is bounded in BYTES, not only in entries -----------------
+//
+// `eventsMax` alone bounds the COUNT: fifty entries of any size each, in a blob
+// every board GET reads back. Today's extension stays far inside that — search
+// caps at 200 hits with a 340-character snippet — so nothing has hit it; the
+// rule was simply missing, while a frame and a message each had one. The rule
+// is the frame's: the frame is the largest thing this relay stores for a
+// board, so the event ring may not exceed what one frame may.
+
+{
+  const store = fakeStore()
+  const huge = { kind: 'event', events: [{ type: 'searchResults', blob: 'x'.repeat(FRAME_MAX_BYTES) }] }
+  const tooBig = await post(store, { body: huge })
+  ok(tooBig.status === 413, 'an events POST larger than a frame may be is refused')
+  ok(store.map.get(`e:${ID}`) === undefined, '…and nothing was stored')
+}
+
+{
+  const store = fakeStore()
+  // Five events, each a fifth of the ceiling: under the count limit the whole
+  // way, over the byte ceiling by the fourth.
+  const chunk = 'y'.repeat(Math.floor(FRAME_MAX_BYTES / 5))
+  for (let i = 0; i < 5; i++) {
+    const r = await post(store, { body: { kind: 'event', events: [{ type: 'searchResults', i, chunk }] } })
+    ok(r.status === 200, `event ${i} is accepted on its own — each is well under the ceiling`)
+  }
+  const text = store.map.get(`e:${ID}`)
+  const ring = JSON.parse(text)
+  ok(text.length <= FRAME_MAX_BYTES,
+    `the stored ring is within the ceiling (${text.length} <= ${FRAME_MAX_BYTES})`)
+  ok(ring.length < 5 && ring.length >= 1, `and it evicted to get there (${ring.length} of 5 kept)`)
+  ok(ring[ring.length - 1].msg.i === 4, 'the NEWEST is what is kept — an evicting ring drops the oldest')
+  const early = await handle({ method: 'GET', boardId: ID, since: 0 }, store)
+  ok(early.json.gap === true,
+    'a reader older than what survived is told gap:true — the same path a slow poller already takes')
+}
+
+{
+  // The eviction loop keeps one entry whatever its size, and that arm is not
+  // reachable from outside — which is the POINT, and is the thing to pin.
+  // An accepted event ALWAYS fits the ring on its own, because the POST guard
+  // measures a strictly larger string: `{"kind":"event","events":[X]}` wraps X
+  // in more characters than `{"seq":n,"msg":X}` does. So the ceiling can never
+  // answer `ok` to an event and then store nothing — the two rules cannot
+  // invert. If someone widens the POST guard past the ring ceiling, this is
+  // what says so.
+  const store = fakeStore()
+  const big = 'w'.repeat(FRAME_MAX_BYTES - 100)
+  const body = { kind: 'event', events: [{ type: 'searchResults', big }] }
+  ok(JSON.stringify(body).length <= FRAME_MAX_BYTES, 'the largest event the POST guard admits, admitted')
+  const r = await post(store, { body })
+  ok(r.status === 200, '…posts')
+  const text = store.map.get(`e:${ID}`)
+  const ring = JSON.parse(text)
+  ok(ring.length === 1 && ring[0].msg.type === 'searchResults',
+    'and it is stored, alone — an accepted event is never evicted to nothing')
+  ok(text.length <= FRAME_MAX_BYTES,
+    `and it still fits the ring ceiling, because the POST guard measures more (${text.length})`)
+}
+
 // --- the message queue -------------------------------------------------------
 
 const postMsg = (store, nonce, msg, extra = {}) => post(store, {
